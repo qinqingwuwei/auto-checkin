@@ -1,0 +1,53 @@
+name: Build and Release
+
+on:
+  push:
+    branches: ['main']
+    tags: ['v*']
+  pull_request:
+    branches: ['main']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.12'
+          cache: true
+      - run: go test ./... && go vet ./...
+      - name: Build four standalone binaries
+        env:
+          CHECKIN_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+        run: ./scripts/build-release.sh "$CHECKIN_VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: checkin-binaries
+          compression-level: 0
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: checkin-binaries
+          path: dist
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CHECKIN_TAG: ${{ github.ref_name }}
+        run: gh release create "$CHECKIN_TAG" dist/*.zip dist/SHA256SUMS --verify-tag --generate-notes --title "checkin $CHECKIN_TAG"
