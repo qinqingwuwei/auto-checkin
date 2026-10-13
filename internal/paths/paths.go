@@ -1,6 +1,7 @@
 package paths
 
 import (
+	"checkin/internal/fileperm"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,6 +47,9 @@ func Ensure() error {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			return err
 		}
+		if err := fileperm.Restrict(dir, 0700); err != nil {
+			return err
+		}
 	}
-	return os.Chmod(Root(), 0700)
+	return nil
 }

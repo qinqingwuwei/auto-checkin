@@ -1,7 +1,7 @@
 package paths
 
 import (
-	"os"
+	"checkin/internal/fileperm"
 	"path/filepath"
 	"testing"
 )
@@ -20,8 +20,8 @@ func TestOverrideAndLayout(t *testing.T) {
 	if WorkBuddyCreds() != filepath.Join(root, "credentials", "workbuddy") {
 		t.Fatal(WorkBuddyCreds())
 	}
-	if info, err := os.Stat(root); err != nil || info.Mode().Perm() != 0700 {
-		t.Fatalf("root permissions: %v", err)
+	if !fileperm.Private(root, 0700) {
+		t.Fatal("root permissions")
 	}
 	t.Setenv("CHECKIN_HOME", "~/.checkin-test")
 	if Root() != filepath.Join(Home(), ".checkin-test") {

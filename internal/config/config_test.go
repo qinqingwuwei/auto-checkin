@@ -1,6 +1,7 @@
 package config
 
 import (
+	"checkin/internal/fileperm"
 	"checkin/internal/paths"
 	"encoding/json"
 	"os"
@@ -65,8 +66,7 @@ func TestDirtyDiskAndSecrets(t *testing.T) {
 	if ready, _ := DingtalkReady(cfg); !ready {
 		t.Fatal("dingtalk not ready")
 	}
-	info, _ := os.Stat(paths.Config())
-	if info.Mode().Perm() != 0600 {
+	if !fileperm.Private(paths.Config(), 0600) {
 		t.Fatal("config mode")
 	}
 }

@@ -1,6 +1,7 @@
 package util
 
 import (
+	"checkin/internal/fileperm"
 	"encoding/base64"
 	"os"
 	"path/filepath"
@@ -25,8 +26,7 @@ func TestJWTAndAtomicData(t *testing.T) {
 	if ReadMap(file)["hello"] != "changed" {
 		t.Fatal("replace failed")
 	}
-	info, _ := os.Stat(file)
-	if info.Mode().Perm() != 0600 {
+	if !fileperm.Private(file, 0600) {
 		t.Fatal("permissions")
 	}
 	jsonl := filepath.Join(t.TempDir(), "points.jsonl")

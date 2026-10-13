@@ -3,6 +3,7 @@ package util
 import (
 	"bufio"
 	"bytes"
+	"checkin/internal/fileperm"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -261,7 +262,7 @@ func AtomicWrite(path string, data []byte, mode os.FileMode) error {
 	}
 	tmp := f.Name()
 	defer os.Remove(tmp)
-	if err = f.Chmod(mode); err == nil {
+	if err = fileperm.Restrict(tmp, mode); err == nil {
 		_, err = f.Write(data)
 	}
 	if err == nil {
@@ -306,7 +307,7 @@ func AppendJSONL(path string, obj M) error {
 		return err
 	}
 	defer f.Close()
-	if err = f.Chmod(0600); err != nil {
+	if err = fileperm.Restrict(path, 0600); err != nil {
 		return err
 	}
 	_, err = f.Write(append(data, '\n'))

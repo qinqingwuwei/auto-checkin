@@ -100,7 +100,7 @@ Go 单文件程序，内嵌本地 WebUI，支持账号登录、每日签到、�
 
 未配置钉钉仍可签到，结果会写入日志。Windows / Linux 使用日志与钉钉，当前无本地系统通知。
 
-Go 版直接读写原有 `~/.checkin/`：`config.json`、`state.json`、`points.jsonl`、`logs/`、`credentials/trae.json`、`credentials/workbuddy/<uid>.json`。支持 `trae-web-state.json`、`workbuddy-sms.json`、`workbuddy-oauth.json` 的首次导入。凭据与配置使用 0600 权限、原子写入；日志每 2 MiB 轮转，保留 5 份。凭据当前是本地文件保存，尚未集成系统密钥库。工具不写入产品客户端目录。
+Go 版直接读写原有 `~/.checkin/`：`config.json`、`state.json`、`points.jsonl`、`logs/`、`credentials/trae.json`、`credentials/workbuddy/<uid>.json`。支持 `trae-web-state.json`、`workbuddy-sms.json`、`workbuddy-oauth.json` 的首次导入。凭据与配置原子写入；macOS / Linux 使用 0600 文件与 0700 目录权限，Windows 使用仅允许当前用户和 SYSTEM 的原生 ACL；日志每 2 MiB 轮转，保留 5 份。凭据当前是本地文件保存，尚未集成系统密钥库。工具不写入产品客户端目录。
 
 Trae 会话经 POST `GetUserToken` 换 JWT，提前 10 分钟换票。WorkBuddy 的 AT 不足 6 小时自动续期，业务接口与 OAuth 接口使用各自 host。
 

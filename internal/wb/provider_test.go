@@ -1,6 +1,7 @@
 package wb
 
 import (
+	"checkin/internal/fileperm"
 	"checkin/internal/netutil"
 	"checkin/internal/paths"
 	"checkin/internal/provider"
@@ -12,7 +13,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 )
@@ -118,8 +118,7 @@ func TestRefreshAndLegacyMultipleAccounts(t *testing.T) {
 		t.Fatal("expired refresh token used")
 	}
 	path, _ := credPath("uid-1")
-	info, _ := os.Stat(path)
-	if info.Mode().Perm() != 0600 {
+	if !fileperm.Private(path, 0600) {
 		t.Fatal("cred permissions")
 	}
 	if _, err := credPath("../../state"); err == nil {
