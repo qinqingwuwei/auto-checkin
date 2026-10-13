@@ -20,20 +20,4 @@ fi
 chmod 755 "$checkin_binary"
 export CHECKIN_HOME="$checkin_root"
 "$checkin_binary" --version
-if [ -t 0 ]; then
-  if [ ! -s "$checkin_root/credentials/trae.json" ] && [ ! -s "$checkin_root/trae-web-state.json" ]; then
-    read -r -p 'Trae 未登录，按 Enter 打开系统浏览器登录（输入 n 跳过）：' checkin_answer || checkin_answer=n
-    if [ "$checkin_answer" != n ]; then "$checkin_binary" login trae || true; fi
-  fi
-  if ! compgen -G "$checkin_root/credentials/workbuddy/*.json" >/dev/null && [ ! -s "$checkin_root/workbuddy-sms.json" ] && [ ! -s "$checkin_root/workbuddy-oauth.json" ]; then
-    read -r -p 'WorkBuddy 登录：1 浏览器扫码 / 2 短信 / 3 跳过 [3]：' checkin_method || checkin_method=3
-    case "$checkin_method" in
-      1) "$checkin_binary" login workbuddy --method browser || true ;;
-      2) "$checkin_binary" login workbuddy --method sms || true ;;
-    esac
-  fi
-fi
-if [ "$(uname -s)" = Darwin ]; then "$checkin_binary" schedule install; fi
-"$checkin_binary" doctor
-"$checkin_binary" run --dry-run
-printf '\n%s\n' "安装完成：$checkin_binary" "看板：\"$checkin_binary\" ui"
+printf '\n%s\n' "安装完成：$checkin_binary" "看板：\"$checkin_binary\" ui" '在看板中启用定时，退出程序即停止；不会安装系统后台任务。'

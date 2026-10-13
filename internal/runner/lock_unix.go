@@ -17,7 +17,7 @@ func acquireRunLock() (func(), error) {
 	}
 	if err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
-		return nil, fmt.Errorf("已有签到任务正在执行，请稍后重试")
+		return nil, fmt.Errorf("已有签到或账号操作正在执行，请稍后重试")
 	}
 	return func() { syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
 }

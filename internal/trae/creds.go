@@ -9,6 +9,7 @@ import (
 	"checkin/internal/util"
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 )
@@ -50,6 +51,23 @@ func load() util.M {
 	return nil
 }
 func Load() util.M { credMu.Lock(); defer credMu.Unlock(); return load() }
+
+// Remove imported credentials and the dedicated browser session too, so a
+// later status request or browser login cannot silently restore the account.
+func Logout() error {
+	credMu.Lock()
+	defer credMu.Unlock()
+	for _, path := range []string{paths.LegacyTrae(), paths.TraeCookies()} {
+		if err := credstore.Remove(path); err != nil {
+			return err
+		}
+	}
+	if err := os.RemoveAll(paths.TraeProfile()); err != nil {
+		return err
+	}
+	return credstore.Remove(paths.TraeCred())
+}
+
 func credentialRequest(ctx context.Context, c *netutil.Client, base, path, session, label string) (util.M, error) {
 	data, status, err := c.Request(ctx, "POST", base+path, map[string]string{SessionCookie: session, "Content-Type": "application/json"}, util.M{}, label)
 	if status == 401 || status == 403 {

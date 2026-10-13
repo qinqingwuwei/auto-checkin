@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"checkin/internal/auth"
 	"checkin/internal/config"
 	"checkin/internal/logx"
 	"checkin/internal/paths"
@@ -61,10 +62,13 @@ func help() {
   status    查看本地状态（--json）
   doctor    检查配置、凭据、网络与定时（--offline）
   login     trae / workbuddy（--method browser|sms）
+  logout    trae / workbuddy --uid <账号 UID>（清除本地凭据）
   config    show / get <点路径> / set <点路径> <值> / path
-  schedule  install / uninstall / status
+  schedule  enable / disable / status（定时随 ui 进程启停）
   ui        本地 Web 看板（--port 8765 / --no-open）
-  --version 查看版本`)
+  --version 查看版本
+
+不带命令启动本地看板；关闭进程或在页面点击「退出程序」停止定时。`)
 }
 func Main(ctx context.Context, args []string) int {
 	root := flag.NewFlagSet("checkin", flag.ContinueOnError)
@@ -83,10 +87,6 @@ func Main(ctx context.Context, args []string) int {
 		fmt.Println("checkin " + version.Version)
 		return 0
 	}
-	if root.NArg() == 0 {
-		help()
-		return 0
-	}
 	if *home != "" {
 		os.Setenv("CHECKIN_HOME", *home)
 	}
@@ -95,6 +95,9 @@ func Main(ctx context.Context, args []string) int {
 		return 1
 	}
 	args = root.Args()
+	if len(args) == 0 {
+		args = []string{"ui"}
+	}
 	switch args[0] {
 	case "run":
 		return run(ctx, args[1:])
@@ -104,6 +107,8 @@ func Main(ctx context.Context, args []string) int {
 		return doctor(ctx, args[1:])
 	case "login":
 		return login(ctx, args[1:])
+	case "logout":
+		return logout(args[1:])
 	case "config":
 		return configCommand(args[1:])
 	case "schedule":
@@ -307,7 +312,7 @@ func configCommand(args []string) int {
 }
 func schedule(ctx context.Context, args []string) int {
 	if len(args) != 1 {
-		fmt.Println("用法：checkin schedule install|uninstall|status")
+		fmt.Println("用法：checkin schedule enable|disable|status（仅 ui 进程运行时执行）")
 		return 2
 	}
 	var ok bool
@@ -316,12 +321,12 @@ func schedule(ctx context.Context, args []string) int {
 	case "status":
 		printJSON(scheduler.Status(ctx))
 		return 0
-	case "install":
+	case "enable", "install":
 		ok, msg = scheduler.Install(ctx)
-	case "uninstall":
+	case "disable", "uninstall":
 		ok, msg = scheduler.Uninstall(ctx)
 	case "--help", "-h":
-		fmt.Println("用法：checkin schedule install|uninstall|status")
+		fmt.Println("用法：checkin schedule enable|disable|status（install/uninstall 是兼容别名，不注册系统任务）")
 		return 0
 	default:
 		return 2
@@ -352,18 +357,12 @@ func login(ctx context.Context, args []string) int {
 			fmt.Println("未知浏览器通道：" + *channel)
 			return 2
 		}
-		cred, err := trae.BrowserLogin(ctx, *channel, time.Duration(*timeout*float64(time.Second)))
+		msg, err := auth.Login(ctx, auth.LoginOptions{Product: "trae", Method: "browser", Channel: *channel, Timeout: time.Duration(*timeout * float64(time.Second))}, nil)
 		if err != nil {
 			fmt.Println("登录失败：" + err.Error())
 			return 1
 		}
-		token, err := trae.Token(ctx, true)
-		if err != nil {
-			fmt.Println("登录失败：" + err.Error())
-			return 1
-		}
-		fmt.Printf("Trae 登录成功：会话有效期至 %s，来源 %s\n", util.Timestamp(cred["sessionExpires"]), util.String(cred["source"]))
-		fmt.Printf("换票验证通过：JWT %d 字符，过期 %s\n", len(token), util.Remain(util.JWTExp(token)))
+		fmt.Println(msg)
 		return 0
 	}
 	if args[0] != "workbuddy" {
@@ -378,11 +377,8 @@ func login(ctx context.Context, args []string) int {
 	if status := parse(f, args[1:]); status >= 0 {
 		return status
 	}
-	var cred util.M
-	var err error
 	if *method == "browser" {
 		fmt.Printf("将用系统默认浏览器打开登录页，请在 %d 秒内完成登录（微信扫码）…\n", int(*timeout))
-		cred, err = wb.LoginOAuth(ctx, time.Duration(*timeout*float64(time.Second)))
 	} else if *method == "sms" {
 		input := bufio.NewReader(os.Stdin)
 		interactive := func() bool { info, e := os.Stdin.Stat(); return e == nil && info.Mode()&os.ModeCharDevice != 0 }
@@ -417,26 +413,40 @@ func login(ctx context.Context, args []string) int {
 			fmt.Println("未输入验证码")
 			return 2
 		}
-		cred, err = wb.LoginSMS(ctx, *phone, *code)
 	} else {
 		fmt.Println("--method 应为 browser / sms")
 		return 2
 	}
+	msg, err := auth.Login(ctx, auth.LoginOptions{Product: "workbuddy", Method: *method, Phone: *phone, Code: *code, Timeout: time.Duration(*timeout * float64(time.Second))}, nil)
 	if err != nil {
 		fmt.Println("登录失败：" + err.Error())
 		return 1
 	}
-	fmt.Printf("WorkBuddy 登录成功：uid=%s，AT 过期 %s，登录方式 %s\n", wb.ShortUID(cred["uid"]), util.Remain(cred["expiresAt"]), util.String(cred["loginMethod"]))
-	p, err := wb.New(ctx, cred)
-	if err == nil {
-		defer p.Close()
-		result, e := p.Status(ctx)
-		err = e
-		if err == nil {
-			fmt.Println("Token 验证通过：" + result.Message)
-			return 0
+	fmt.Println(msg)
+	return 0
+}
+
+func logout(args []string) int {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
+		fmt.Println("用法：checkin logout trae\n      checkin logout workbuddy --uid <账号 UID>（通过 status --json 查看）")
+		if len(args) == 0 {
+			return 2
 		}
+		return 0
 	}
-	fmt.Println("Token 验证未通过（请稍后重试 doctor）：" + err.Error())
-	return 1
+	f := flag.NewFlagSet("logout", flag.ContinueOnError)
+	uid := f.String("uid", "", "要登出的 WorkBuddy 账号 UID")
+	if code := parse(f, args[1:]); code >= 0 {
+		return code
+	}
+	if err := auth.ValidateLogout(args[0], *uid); err != nil {
+		fmt.Println(err)
+		return 2
+	}
+	if err := auth.Logout(args[0], *uid); err != nil {
+		fmt.Println("登出失败：" + err.Error())
+		return 1
+	}
+	fmt.Println("已清除本工具的登录凭据；积分历史保留。其他客户端的登录状态不受影响。")
+	return 0
 }

@@ -16,7 +16,8 @@ import (
 
 type Config struct {
 	Schedule struct {
-		Time string `json:"time"`
+		Time    string `json:"time"`
+		Enabled bool   `json:"enabled"`
 	} `json:"schedule"`
 	ExpiryWarningDays int `json:"expiry_warning_days"`
 	Notify            struct {
@@ -42,7 +43,7 @@ type Config struct {
 
 var mu sync.Mutex
 var timePattern = regexp.MustCompile(`^(\d{1,2}):(\d{1,2})$`)
-var Keys = []string{"schedule.time", "expiry_warning_days", "notify.dingtalk.enabled", "notify.dingtalk.webhook", "notify.dingtalk.secret", "notify.local.enabled", "notify.daily_summary", "products.trae.enabled", "products.workbuddy.enabled"}
+var Keys = []string{"schedule.time", "schedule.enabled", "expiry_warning_days", "notify.dingtalk.enabled", "notify.dingtalk.webhook", "notify.dingtalk.secret", "notify.local.enabled", "notify.daily_summary", "products.trae.enabled", "products.workbuddy.enabled"}
 
 func Defaults() Config {
 	var c Config
@@ -106,7 +107,7 @@ func Validate(key string, raw any) (any, error) {
 			return nil, fmt.Errorf("加签 secret 长度不足 8 位（请检查是否复制完整）")
 		}
 		return text, nil
-	case "notify.dingtalk.enabled", "notify.local.enabled", "notify.daily_summary", "products.trae.enabled", "products.workbuddy.enabled":
+	case "schedule.enabled", "notify.dingtalk.enabled", "notify.local.enabled", "notify.daily_summary", "products.trae.enabled", "products.workbuddy.enabled":
 		switch strings.ToLower(text) {
 		case "true", "1", "yes", "on", "y", "t", "enabled", "开", "是":
 			return true, nil

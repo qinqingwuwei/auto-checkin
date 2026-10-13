@@ -7,12 +7,36 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"regexp"
 	"time"
 )
 
 const OAuthWait = 300 * time.Second
 
+var phonePattern = regexp.MustCompile(`^1[3-9][0-9]{9}$`)
+var codePattern = regexp.MustCompile(`^[0-9]{4,8}$`)
+
+func ValidatePhone(phone string) error {
+	if !phonePattern.MatchString(phone) {
+		return fmt.Errorf("请输入有效的 11 位中国大陆手机号")
+	}
+	return nil
+}
+
+func ValidateSMS(phone, code string) error {
+	if err := ValidatePhone(phone); err != nil {
+		return err
+	}
+	if !codePattern.MatchString(code) {
+		return fmt.Errorf("验证码应为 4–8 位数字")
+	}
+	return nil
+}
+
 func SendSMS(ctx context.Context, phone string) (bool, string) {
+	if err := ValidatePhone(phone); err != nil {
+		return false, err.Error()
+	}
 	c := netutil.New(20 * time.Second)
 	defer c.Close()
 	return sendSMSWithClient(ctx, c, SMSHost, phone)
@@ -28,6 +52,9 @@ func sendSMSWithClient(ctx context.Context, c *netutil.Client, base, phone strin
 	return true, fmt.Sprintf("验证码已发送（%s 秒内有效，手机号 %s）", util.String(util.Or(util.Map(data["data"])["expires_in"], "?")), util.MaskPhone(phone))
 }
 func LoginSMS(ctx context.Context, phone, code string) (util.M, error) {
+	if err := ValidateSMS(phone, code); err != nil {
+		return nil, err
+	}
 	c := netutil.New(30 * time.Second)
 	defer c.Close()
 	return loginSMSWithClient(ctx, c, SMSHost, phone, code)
@@ -51,6 +78,9 @@ func loginSMSWithClient(ctx context.Context, c *netutil.Client, base, phone, cod
 	}
 	cred := loginCredential(uid, at, util.Or(payload["refreshToken"], payload["refresh_token"]), util.Or(payload["expiresIn"], payload["expires_in"]), "phone", "sms")
 	cred["phone"] = phone
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err = Save(cred); err != nil {
 		return nil, err
 	}
@@ -96,6 +126,9 @@ func saveOAuth(ctx context.Context, c *netutil.Client, host, state, at string, r
 		return nil, fmt.Errorf("登录成功但无法确定 uid（account 与 JWT 都没有）")
 	}
 	cred := loginCredential(uid, at, rt, expiresIn, "browser", "oauth:"+host)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err = Save(cred); err != nil {
 		return nil, err
 	}
@@ -122,6 +155,10 @@ func pollOAuth(ctx context.Context, c *netutil.Client, host, state string, inter
 	}
 }
 func LoginOAuth(ctx context.Context, timeout time.Duration) (util.M, error) {
+	return LoginOAuthWithURL(ctx, timeout, nil)
+}
+
+func LoginOAuthWithURL(ctx context.Context, timeout time.Duration, onURL func(string)) (util.M, error) {
 	if timeout <= 0 {
 		return nil, fmt.Errorf("timeout 必须大于 0")
 	}
@@ -137,8 +174,11 @@ func LoginOAuth(ctx context.Context, timeout time.Duration) (util.M, error) {
 		loginURL = host + "/login?platform=CLI&state=" + url.QueryEscape(state)
 	}
 	u, err := url.Parse(loginURL)
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
+	if err != nil || u.Hostname() == "" || u.User != nil || (u.Scheme != "https" && u.Scheme != "http") {
 		return nil, fmt.Errorf("OAuth 登录链接无效")
+	}
+	if onURL != nil {
+		onURL(loginURL)
 	}
 	logx.Info("WorkBuddy 登录页：%s", loginURL)
 	launch, cancelLaunch := context.WithTimeout(wait, 20*time.Second)

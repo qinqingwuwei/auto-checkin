@@ -1,127 +1,141 @@
 # checkin · Trae CN + WorkBuddy 签到与积分助手
 
-每天定时签到、读取逐批积分台账，并在积分临近到期或执行异常时通知。Go 单文件二进制内嵌本地 Web 看板，运行签到无需 Go、Python 或其他运行时。Trae 浏览器登录复用系统 Chrome / Edge / Chromium，不下载浏览器。
+Go 单文件程序，内嵌本地 WebUI，支持账号登录、每日签到、逐批积分台账和到期预警。用户运行时无需安装 Go 或 Python；Trae 登录复用系统 Chrome / Edge / Chromium。
 
-## 快速开始
+**定时签到随程序进程启停。** 默认关闭；在页面启用后，仅程序运行期间执行。关闭 EXE 窗口、结束进程、Ctrl+C 或点击页面「退出程序」后停止。安装和运行均不会注册新的系统后台任务。
 
-从 [GitHub Releases](https://github.com/qinqingwuwei/auto-checkin/releases) 下载并解压对应包：
+## 下载与启动
+
+从 [GitHub Releases](https://github.com/qinqingwuwei/auto-checkin/releases) 下载当前版本对应平台的 ZIP。`<版本>` 为不带 `v` 的版本号，例如 `0.3.0`：
 
 | 平台 | 压缩包 |
 | --- | --- |
-| macOS Apple Silicon | `checkin-darwin-arm64.zip` |
-| macOS Intel | `checkin-darwin-amd64.zip` |
-| Windows x64 | `checkin-windows-amd64.zip` |
-| Linux x64 | `checkin-linux-amd64.zip` |
+| macOS Apple Silicon | `checkin-<版本>-darwin-arm64.zip` |
+| macOS Intel | `checkin-<版本>-darwin-amd64.zip` |
+| Windows x64 | `checkin-<版本>-windows-amd64.zip` |
+| Linux x64 | `checkin-<版本>-linux-amd64.zip` |
 
-在解压目录执行（Windows 使用 `checkin.exe`）：
+一个平台一份 ZIP，每份同时支持 Trae CN 与 WorkBuddy。ZIP 内直接包含二进制、README 和对应安装脚本，无需从源码安装运行时。正式 Release 另提供 `SHA256SUMS`，用于核对文件完整性；GitHub 自动附带的 Source code 是源码包。
+
+解压后运行：
 
 ```bash
-./checkin doctor
-./checkin login trae
-./checkin login workbuddy --method browser
-# 或短信登录：不带 --code 时先发码并提示输入；提供 --code 时直接使用已有验证码
-./checkin login workbuddy --method sms --phone 138xxxxxxxx
-./checkin run --dry-run
-./checkin run
 ./checkin ui
+# 不带命令也会打开看板：./checkin
+# Windows：双击 checkin.exe，或运行 .\checkin.exe ui
 ```
 
-首次使用尚未登录时，`doctor` 会报告缺少凭据。登录后再次自检即可。macOS 如提示无法打开下载的二进制，可在系统设置“隐私与安全性”中选择允许打开。
+在页面「账号登录」中登录，然后手动执行一次签到。在「配置」中设置每日时间并点击「启用定时签到」。页面显示运行状态和下次执行时间。macOS 如提示无法打开，可在系统设置「隐私与安全性」中允许打开。
 
-安装至固定位置后再启用定时任务，不能删除或移动该二进制：
+需要安装到固定位置时，在解压目录运行 `./setup.sh`；Windows PowerShell 运行 `.\setup.ps1`。脚本仅安装二进制到 `~/.checkin/bin/` 并显示启动命令，不自动登录、领取积分或启用定时。直接从解压目录运行也可以。
 
-```bash
-mkdir -p ~/.checkin/bin
-cp ./checkin ~/.checkin/bin/checkin
-~/.checkin/bin/checkin schedule install
-~/.checkin/bin/checkin schedule status
-```
+## WebUI 账号与程序管理
 
-Windows 可将 `checkin.exe` 放在固定目录，执行 `checkin.exe schedule install`。默认每天本地时间 **08:00** 执行；电脑需要开机，错过时间会在系统允许时补跑。Linux 可用 cron 调用固定路径的 `checkin run`。
+- **Trae CN**：选择系统浏览器并点击「浏览器登录」。打开独立窗口，8 分钟内完成登录，捕获会话后验证换票。
+- **WorkBuddy**：点击「浏览器登录 / 添加账号」，在授权页面完成登录；也可展开短信登录，输入手机号、发送验证码并登录。支持多个账号分别登出，页面发码间隔至少 60 秒。
+- **取消等待**：浏览器登录或短信请求未完成时，可取消。程序退出也会中断正在等待的操作。
+- **登出**：清除本工具的凭据、对应遗留导入文件和 Trae 专用浏览器会话，保留积分历史。不会注销官方网站或其他产品客户端，也不承诺服务端撤销已签发的 token。
+- **退出程序**：关闭本机服务并停止定时、取消正在执行的网络操作。**仅关闭浏览器标签页不会结束程序进程。**
 
-### 从源码构建
+页面资源嵌入二进制，不依赖源码目录。服务仅监听 `127.0.0.1`，校验 Host；写接口要求 `X-Checkin: 1`，不开放 CORS。登录凭据与验证码不返回给前端；前端只显示账号状态、操作结果及临时浏览器授权链接。
 
-需要 Go **1.23+**。第三方库仅用于系统浏览器控制的 chromedp 及其依赖，全部编译进二进制。
+## 定时机制
 
-```bash
-git clone https://github.com/qinqingwuwei/auto-checkin.git
-cd auto-checkin
-CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o checkin ./cmd/checkin
-./setup.sh
-# Windows PowerShell：.\setup.ps1
-```
+所有平台均使用程序内调度，由 `checkin ui` 进程持有计时器：
 
-setup 脚本优先使用仓库目录的现成二进制，也可通过 `CHECKIN_BINARY` 指定；否则调用本机 Go 构建，再安装到 `~/.checkin/bin/`。已有凭据会继续使用。
+| 场景 | 行为 |
+| --- | --- |
+| 程序启动，定时已启用 | 等待本机时区下的下一次设定时间 |
+| 到达时间 | 通过共享执行队列签到；页面实时显示执行结果 |
+| 页面手动执行或账号操作正忙 | 当前进程的定时触发等待该操作结束 |
+| 修改时间或关闭定时 | 立即生效 |
+| 关闭 EXE / 退出程序 / 结束进程 | 计时器和本机服务停止，不再签到 |
+| 电脑关机，或程序未运行 | 不执行；重新启动后等待下一次设定时间 |
+| 程序仍在运行，电脑睡眠后唤醒 | 恢复后补触发一次已到期的定时 |
+
+启用状态保存到配置中，重新启动程序后继续使用。默认时间为 **08:00**，默认未启用。无需安装 launchd、任务计划程序或 cron。
+
+旧版曾注册系统任务的用户，启动新 WebUI 或执行 `schedule enable/disable` 时会识别并清理本工具为当前数据目录创建的 `com.checkin.daily` / `checkin-daily`。清理失败会明确报错；其他数据目录的任务不会被误删。手工配置的 cron 或第三方启动项需自行移除。
 
 ## 命令
 
 | 命令 | 说明 |
 | --- | --- |
-| `run [--dry-run] [--force] [--only trae\|workbuddy]` | 签到 → 台账 → 到期汇总 → 通知 → 状态保存；`--only` 可重复 |
-| `status [--json]` | 本地签到记录、凭据状态、最近积分快照 |
-| `doctor [--offline]` | 配置、通知、定时、浏览器、凭据及只读网络检查 |
-| `login trae [--channel chrome\|msedge\|chromium] [--timeout 480]` | 独立持久化浏览器窗口登录，捕获会话并验证换票 |
-| `login workbuddy [--method browser\|sms] [--phone] [--code] [--timeout 300]` | OAuth 浏览器登录或短信登录，多账号独立保存 |
-| `config show\|get\|set\|path` | 点路径配置，自动校验，密钥打码 |
-| `schedule install\|uninstall\|status` | macOS launchd / Windows 任务计划程序 |
-| `ui [--port 8765] [--no-open]` | 本地 Web 看板，端口占用时最多顺延 10 个 |
-| `--version` / `-v` | 版本 / 调试日志；`-v` 放在命令前 |
+| `ui [--port 8765] [--no-open]` | 启动本地 WebUI 和程序内调度；无参数运行也会启动 UI |
+| `run [--dry-run] [--force] [--only trae\|workbuddy]` | 单次签到与台账；`--only` 可重复 |
+| `status [--json]` | 本地记录、凭据状态和积分快照 |
+| `doctor [--offline]` | 配置、通知、浏览器、凭据和只读网络检查 |
+| `login trae [--channel chrome\|msedge\|chromium] [--timeout 480]` | 浏览器登录并验证换票 |
+| `login workbuddy [--method browser\|sms] [--phone] [--code] [--timeout 300]` | 浏览器或短信登录；不带 `--code` 时先发送验证码 |
+| `logout trae` | 清除工具中的 Trae 登录状态 |
+| `logout workbuddy --uid <账号 UID>` | 清除指定 WorkBuddy 账号；UID 可通过 `status --json` 查看 |
+| `schedule enable\|disable\|status` | 保存定时开关或查看配置，实际运行状态以 WebUI 为准 |
+| `config show\|get\|set\|path` | 点路径配置，密钥打码 |
+| `--version` / `--help` / `-v` | 版本 / 帮助 / 调试日志；`-v` 放在命令前 |
 
-`--force` 忽略本地成功日期，但仍先查询远端状态，今日已签时跳过 claim。`--dry-run` 不领取、不写 `state.json` 或 `points.jsonl`、不发通知；日志仍记录，凭据缓存可按需刷新。看板手动执行和定时任务通过系统文件锁互斥。
+旧 `schedule install/uninstall` 保留为 `enable/disable` 的兼容别名，已不再安装系统任务。单独执行 `schedule enable` 后命令会结束；需保持 `checkin ui` 运行才能定时签到。
 
-## 本地看板
+`--force` 忽略本地成功日期，仍先查询远端状态，今日已签时跳过 claim。`--dry-run` 不领取、不写 `state.json` 或 `points.jsonl`、不发通知；日志仍记录，凭据缓存可按需刷新。签到、登录和登出共享系统文件锁，避免定时任务在登出过程中重新写入凭据。
 
-```bash
-~/.checkin/bin/checkin ui
-```
+## 配置与数据
 
-看板包括产品卡片、积分曲线、配置表单、执行实时日志、定时任务和浅/深色主题。页面嵌入二进制，不依赖源码目录。仅监听 `127.0.0.1`，校验 Host；写接口要求 `X-Checkin: 1`，不开放 CORS。凭据只展示状态，密钥不以明文返回。
-
-## 配置
-
-默认 `~/.checkin/config.json`，可用 `CHECKIN_HOME`（或全局参数 `--home <目录>`）覆盖。
+默认 `~/.checkin/config.json`，可用 `CHECKIN_HOME` 或全局参数 `--home <目录>` 覆盖。
 
 | 点路径 | 默认 | 说明 |
 | --- | --- | --- |
-| `schedule.time` | `08:00` | 每日时间，修改后重新 `schedule install` |
-| `expiry_warning_days` | `7` | 到期预警天数，范围 0–365，0 关闭预警 |
+| `schedule.enabled` | `false` | 程序内定时开关 |
+| `schedule.time` | `08:00` | 每日时间，保存后即时生效 |
+| `expiry_warning_days` | `7` | 到期预警 0–365 天，0 关闭预警 |
 | `notify.dingtalk.enabled` | `true` | 钉钉开关 |
-| `notify.dingtalk.webhook` / `notify.dingtalk.secret` | 空 | 自定义机器人 webhook 与加签 secret |
+| `notify.dingtalk.webhook` / `notify.dingtalk.secret` | 空 | webhook 与加签 secret |
 | `notify.local.enabled` | `true` | macOS 系统通知开关 |
 | `notify.daily_summary` | `false` | 每日成功简报，默认仅异常或到期预警通知 |
-| `products.trae.enabled` / `products.workbuddy.enabled` | `true` | 产品开关 |
+| `products.trae.enabled` / `products.workbuddy.enabled` | `true` | 产品签到开关 |
 
 ```bash
-./checkin config show
 ./checkin config set schedule.time 07:30
-./checkin schedule install
-./checkin config set notify.dingtalk.webhook 'https://oapi.dingtalk.com/robot/send?access_token=...'
-./checkin config set notify.dingtalk.secret 'SEC...'
+./checkin schedule enable
+./checkin ui
 ```
 
-未配置钉钉时 `doctor` 为 WARN，仍可签到，通知降级为本地通知和日志。Windows / Linux 当前使用日志与钉钉，无本地系统通知。
+未配置钉钉仍可签到，结果会写入日志。Windows / Linux 使用日志与钉钉，当前无本地系统通知。
 
-## 数据与兼容性
+Go 版直接读写原有 `~/.checkin/`：`config.json`、`state.json`、`points.jsonl`、`logs/`、`credentials/trae.json`、`credentials/workbuddy/<uid>.json`。支持 `trae-web-state.json`、`workbuddy-sms.json`、`workbuddy-oauth.json` 的首次导入。凭据与配置使用 0600 权限、原子写入；日志每 2 MiB 轮转，保留 5 份。凭据当前是本地文件保存，尚未集成系统密钥库。工具不写入产品客户端目录。
 
-Go 版直接读写原有 `~/.checkin/`，无需迁移：`config.json`、`state.json`、`points.jsonl`、`logs/`、`credentials/trae.json`、`credentials/workbuddy/<uid>.json`。仍支持 `trae-web-state.json`、`workbuddy-sms.json`、`workbuddy-oauth.json` 遗留凭据的首次导入。凭据与配置为 0600，原子写入；日志每 2 MiB 轮转，保留 5 份。工具不写入任何产品客户端目录。
-
-Trae 使用会话 `X-Cloudide-Session` 经 **POST** `GetUserToken` 换 JWT，业务请求为 `Authorization: Cloud-IDE-JWT <jwt>`，提前 10 分钟换票。WorkBuddy 使用 Bearer / X-User-Id，AT 不足 6 小时自动续期；业务 host 与插件 OAuth host 按原协议分别切换。
+Trae 会话经 POST `GetUserToken` 换 JWT，提前 10 分钟换票。WorkBuddy 的 AT 不足 6 小时自动续期，业务接口与 OAuth 接口使用各自 host。
 
 ## 开发与发布
+
+源码兼容 Go **1.23+**，CI 和发布固定使用 Go **1.27.2**：
 
 ```bash
 go test ./...
 go test -race ./...
 go vet ./...
-./scripts/build-release.sh 0.2.0
+CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o checkin ./cmd/checkin
+./scripts/build-release.sh 0.3.0
 ```
 
-GitHub Actions 在推送 main、创建面向 main 的 PR 或手动运行时，使用 Go 1.23.12 测试并交叉编译四个平台。构建完成后，在 Actions 对应运行的 Artifacts 下载 `checkin-binaries`；只有推送 `v*` tag 才会创建 GitHub Release。
+未注入发布版本的源码构建显示 `dev`；Tag `v0.3.0` 的二进制显示 `0.3.0`。构建脚本输出至 `dist/<版本>/`，使用 ZIP 最高压缩级别并固定文件时间、执行权限；每个平台原始二进制限制为 12 MiB。
 
-发布脚本生成使用 ZIP 最高压缩级别的四平台 zip 和 `SHA256SUMS`，每个平台原始二进制须不超过 12 MiB。仓库仅提交源码、测试与构建脚本；本地 `.trae/` 工作资料、二进制、dist/ 和覆盖率输出均不提交。
+GitHub Actions 在 main 推送、面向 main 的 PR 和手动运行时进行三平台测试、Linux race 检查和四平台打包。Artifacts 分开展示：
 
-## 风险与致谢
+| Actions 下载项 | 内容 |
+| --- | --- |
+| `checkin-darwin-arm64` | Apple Silicon ZIP + 该 ZIP 的 SHA256 |
+| `checkin-darwin-amd64` | Intel macOS ZIP + SHA256 |
+| `checkin-windows-amd64` | Windows x64 ZIP + SHA256 |
+| `checkin-linux-amd64` | Linux x64 ZIP + SHA256 |
+| `checkin-checksums` | 全部四个 ZIP 的 `SHA256SUMS` |
 
-两侧接口来自社区公开实现，产品改版或风控可能使接口失效。WorkBuddy 规则限制通过脚本或接口领取活跃奖励，多账号也可能带来账号风险，请自行判断是否使用。凭据失效会明确提示重新登录。
+GitHub Artifacts 下载会再套一层 ZIP，是 GitHub 的标准行为；各平台已独立。普通构建使用 `dev-<提交>` 版本，仅推送合法 `vMAJOR.MINOR.PATCH` Tag 才发布 Release，包含四个独立平台 ZIP 和 `SHA256SUMS`。预发布 Tag 如 `v0.3.0-rc.1` 标记为 Pre-release。正式发布步骤见 [发布流程](docs/RELEASING.md)。
+
+仓库仅提交源码、测试、文档和构建脚本，`.trae/`、二进制与 dist/ 不提交。
+
+## 风险、限制与致谢
+
+接口来自社区公开实现，产品改版或风控可能使其失效。WorkBuddy 规则限制通过脚本或接口领取活跃奖励，多账号也可能带来账号风险，请自行判断。真实扫码与短信验证码须由账号本人完成，自动化测试使用模拟接口。
+
+当前二进制尚无 Windows Authenticode / macOS 签名与公证；项目尚未选择开源许可证。后续优化建议见 [改进清单](docs/ROADMAP.md)。
 
 接口参考：[workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin)、[WorkBuddy-Daily](https://github.com/L0NE-6/WorkBuddy-Daily)、[Trae-Checkin](https://github.com/ChenLun-dev/Trae-Checkin)、[TraeWorkAssistant](https://github.com/smart-open/TraeWorkAssistant)。

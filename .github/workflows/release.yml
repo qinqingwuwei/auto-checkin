@@ -1,4 +1,4 @@
-name: Build and Release
+name: CI and Release
 
 on:
   push:
@@ -11,43 +11,167 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
 jobs:
-  build:
+  prepare:
     runs-on: ubuntu-latest
-    env:
-      CGO_ENABLED: '0'
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate release tag and source
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            ./scripts/validate-release-tag.sh "$GITHUB_REF_NAME"
+            git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+            printf 'version=%s\n' "${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            printf 'version=dev-%s\n' "${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
+          fi
+
+  test:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.23.12'
+          go-version: '1.27.2'
           cache: true
-      - run: go test ./... && go vet ./...
-      - name: Build four standalone binaries
+      - name: Unit and API tests
+        run: go test ./...
+      - name: Static checks
+        run: go vet ./...
+      - name: Race detector
+        if: runner.os == 'Linux'
+        run: go test -race ./...
+      - name: Native binary smoke test
+        shell: bash
         env:
-          CHECKIN_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
-        run: ./scripts/build-release.sh "$CHECKIN_VERSION"
+          CGO_ENABLED: '0'
+        run: |
+          name=checkin-smoke
+          if [[ "$RUNNER_OS" == Windows ]]; then name=checkin-smoke.exe; fi
+          go build -trimpath -o "$name" ./cmd/checkin
+          "./$name" --version
+          "./$name" --help
+
+  build:
+    needs: [prepare, test]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: darwin
+            arch: arm64
+          - os: darwin
+            arch: amd64
+          - os: windows
+            arch: amd64
+          - os: linux
+            arch: amd64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.2'
+          cache: true
+      - name: Build and package platform binary
+        env:
+          CHECKIN_VERSION: ${{ needs.prepare.outputs.version }}
+          CHECKIN_TARGET: ${{ matrix.os }}/${{ matrix.arch }}
+        run: ./scripts/build-release.sh "$CHECKIN_VERSION" "$CHECKIN_TARGET"
       - uses: actions/upload-artifact@v4
         with:
-          name: checkin-binaries
+          name: checkin-${{ matrix.os }}-${{ matrix.arch }}
           compression-level: 0
+          if-no-files-found: error
           path: |
-            dist/*.zip
-            dist/SHA256SUMS
+            dist/${{ needs.prepare.outputs.version }}/*.zip
+            dist/${{ needs.prepare.outputs.version }}/*.zip.sha256
+
+  checksums:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: checkin-*-*
+          merge-multiple: true
+          path: dist
+      - name: Verify all four release archives
+        env:
+          CHECKIN_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          cd dist
+          sha256sum --check *.zip.sha256
+          sha256sum checkin-*.zip > SHA256SUMS
+          python3 ../scripts/verify-release.py . "$CHECKIN_VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: checkin-checksums
+          compression-level: 0
+          if-no-files-found: error
+          path: dist/SHA256SUMS
+      - name: Download summary
+        env:
+          CHECKIN_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          {
+            printf '## checkin %s\n\n' "$CHECKIN_VERSION"
+            printf '| Platform | Actions artifact | Release ZIP |\n| --- | --- | --- |\n'
+            for target in darwin-arm64 darwin-amd64 windows-amd64 linux-amd64; do
+              printf '| %s | checkin-%s | checkin-%s-%s.zip |\n' "$target" "$target" "$CHECKIN_VERSION" "$target"
+            done
+            printf '\nEach platform has its own ZIP and SHA256 file. New version tags publish four ZIPs and SHA256SUMS to GitHub Releases.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   publish:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    needs: [prepare, checksums]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: checkin-binaries
+          pattern: checkin-*
+          merge-multiple: true
           path: dist
-      - name: Publish GitHub Release
+      - name: Validate release assets again
+        env:
+          CHECKIN_VERSION: ${{ needs.prepare.outputs.version }}
+        run: python3 scripts/verify-release.py dist "$CHECKIN_VERSION"
+      - name: Publish complete GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           CHECKIN_TAG: ${{ github.ref_name }}
-        run: gh release create "$CHECKIN_TAG" dist/*.zip dist/SHA256SUMS --verify-tag --generate-notes --title "checkin $CHECKIN_TAG"
+        shell: bash
+        run: |
+          release_flags=()
+          if [[ "$CHECKIN_TAG" == *-* ]]; then release_flags+=(--prerelease); fi
+          if gh release view "$CHECKIN_TAG" --json isDraft --jq .isDraft > release-draft.txt; then
+            if [[ "$(cat release-draft.txt)" != true ]]; then
+              printf '%s\n' 'This version is already published; create a new version tag instead of replacing released assets.' >&2
+              exit 1
+            fi
+            gh release upload "$CHECKIN_TAG" dist/*.zip dist/SHA256SUMS --clobber
+          else
+            gh release create "$CHECKIN_TAG" dist/*.zip dist/SHA256SUMS --verify-tag --generate-notes --draft --title "checkin $CHECKIN_TAG" "${release_flags[@]}"
+          fi
+          gh release edit "$CHECKIN_TAG" --draft=false "${release_flags[@]}"

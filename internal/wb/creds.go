@@ -43,6 +43,31 @@ func save(cred util.M) error {
 	return credstore.Save(path, cred)
 }
 func Save(cred util.M) error { credMu.Lock(); defer credMu.Unlock(); return save(cred) }
+
+func ValidateUID(uid string) error {
+	_, err := credPath(uid)
+	return err
+}
+
+func Logout(uid string) error {
+	path, err := credPath(uid)
+	if err != nil {
+		return err
+	}
+	credMu.Lock()
+	defer credMu.Unlock()
+	for _, legacy := range paths.LegacyWorkBuddy() {
+		data := util.ReadMap(legacy)
+		legacyUID := util.String(util.Or(data["uid"], util.Dig(util.JWTPayload(util.String(data["accessToken"])), "sub", "uid", "user_id")))
+		if legacyUID == uid {
+			if err := credstore.Remove(legacy); err != nil {
+				return err
+			}
+		}
+	}
+	return credstore.Remove(path)
+}
+
 func importLegacy() {
 	for _, legacy := range paths.LegacyWorkBuddy() {
 		data := util.ReadMap(legacy)

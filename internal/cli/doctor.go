@@ -10,7 +10,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"runtime"
 	"strings"
 )
 
@@ -45,19 +44,10 @@ func doctor(ctx context.Context, args []string) int {
 	}
 	checks = append(checks, check{"钉钉通知", level, reason + "（通知仍会写本地日志）"})
 	sched := scheduler.Status(ctx)
-	level = "WARN"
-	detail = "未安装：checkin schedule install"
-	if runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
-		detail = "当前平台暂不支持内置定时任务，请用 cron"
-	} else if util.Truth(sched["installed"]) {
-		if sched["plist_time"] != sched["config_time"] {
-			detail = fmt.Sprintf("已安装但时间不一致（任务 %v ≠ 配置 %v），请重新 install", sched["plist_time"], sched["config_time"])
-		} else if !util.Truth(sched["loaded"]) {
-			detail = "任务存在但未加载"
-		} else {
-			level = "OK"
-			detail = "已加载，执行时间 " + util.String(sched["plist_time"])
-		}
+	level = "OK"
+	detail = "定时已关闭；可在看板启用"
+	if util.Truth(sched["enabled"]) {
+		detail = "定时已启用（每天 " + util.String(sched["config_time"]) + "），仅 ui 进程运行期间执行；退出后停止"
 	}
 	checks = append(checks, check{"定时任务", level, detail})
 	channels := trae.BrowserChannels()

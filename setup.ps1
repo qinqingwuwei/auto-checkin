@@ -22,23 +22,6 @@ if (Test-Path $checkinSource) {
 }
 $env:CHECKIN_HOME = $checkinRoot
 & $checkinBinary --version
-if (-not (Test-Path (Join-Path $checkinRoot "credentials\trae.json")) -and -not (Test-Path (Join-Path $checkinRoot "trae-web-state.json"))) {
-  $checkinAnswer = Read-Host "Trae 未登录，按 Enter 打开浏览器登录（n 跳过）"
-  if ($checkinAnswer -ne "n") { & $checkinBinary login trae }
-}
-$checkinAccounts = Get-ChildItem (Join-Path $checkinRoot "credentials\workbuddy") -Filter *.json -ErrorAction SilentlyContinue
-if (-not $checkinAccounts -and -not (Test-Path (Join-Path $checkinRoot "workbuddy-sms.json")) -and -not (Test-Path (Join-Path $checkinRoot "workbuddy-oauth.json"))) {
-  $checkinMethod = Read-Host "WorkBuddy 登录：1 浏览器扫码 / 2 短信 / 3 跳过 [3]"
-  switch ($checkinMethod) {
-    "1" { & $checkinBinary login workbuddy --method browser }
-    "2" { & $checkinBinary login workbuddy --method sms }
-  }
-}
-& $checkinBinary schedule install
-if ($LASTEXITCODE -ne 0) { throw "定时任务安装失败" }
-& $checkinBinary doctor
-if ($LASTEXITCODE -ne 0) { throw "自检有异常，请处理后重试" }
-& $checkinBinary run --dry-run
-if ($LASTEXITCODE -ne 0) { throw "干跑验证失败" }
 Write-Host "安装完成：$checkinBinary"
 Write-Host "看板：& '$checkinBinary' ui"
+Write-Host "在看板中启用定时，退出程序即停止；不会安装系统后台任务。"

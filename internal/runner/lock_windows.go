@@ -19,7 +19,7 @@ func acquireRunLock() (func(), error) {
 	r, _, _ := lock.Call(f.Fd(), 3, 0, 1, 0, uintptr(unsafe.Pointer(&overlapped)))
 	if r == 0 {
 		f.Close()
-		return nil, fmt.Errorf("已有签到任务正在执行，请稍后重试")
+		return nil, fmt.Errorf("已有签到或账号操作正在执行，请稍后重试")
 	}
 	return func() { f.Close() }, nil
 }

@@ -142,6 +142,10 @@ func BrowserLogin(ctx context.Context, channel string, timeout time.Duration) (u
 			continue
 		}
 		credMu.Lock()
+		if err := ctx.Err(); err != nil {
+			credMu.Unlock()
+			return nil, err
+		}
 		cred := util.M{"session": session, "sessionExpires": expires, "savedAt": time.Now().Unix(), "source": "browser:" + ch, "loginAt": time.Now().Unix()}
 		err = credstore.Save(paths.TraeCred(), cred)
 		credMu.Unlock()

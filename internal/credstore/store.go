@@ -17,3 +17,11 @@ func Load(path string) util.M {
 	return m
 }
 func Save(path string, data util.M) error { return util.WriteJSON(path, data) }
+
+func Remove(path string) error {
+	err := os.Remove(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}

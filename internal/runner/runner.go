@@ -62,6 +62,15 @@ func New() *Engine {
 	return &Engine{Trae: func(context.Context) (provider.Provider, error) { return trae.New(), nil }, WorkBuddy: func(ctx context.Context, c util.M) (provider.Provider, error) { return wb.New(ctx, c) }, Accounts: wb.LoadAll, TraeAccount: trae.Account, RetryWait: 30 * time.Second, Dispatch: notify.Dispatch}
 }
 func Execute(ctx context.Context, opts Options) (Report, error) { return New().Execute(ctx, opts) }
+
+// AcquireRunLock also serializes account changes with scheduled executions.
+func AcquireRunLock() (func(), error) {
+	if err := paths.Ensure(); err != nil {
+		return nil, err
+	}
+	return acquireRunLock()
+}
+
 func (e *Engine) Execute(ctx context.Context, opts Options) (Report, error) {
 	report := Report{Date: util.Today(), DryRun: opts.DryRun, StartedAt: util.Now(), OK: true, Items: []Item{}}
 	if err := paths.Ensure(); err != nil {

@@ -1,164 +1,129 @@
 package scheduler
 
 import (
-	"bytes"
 	"checkin/internal/config"
-	"checkin/internal/paths"
+	"checkin/internal/logx"
 	"checkin/internal/util"
 	"context"
-	"encoding/xml"
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
-	"strings"
 	"sync"
 	"time"
 )
 
-const Label = "com.checkin.daily"
-const WindowsName = "checkin-daily"
-
-var mu sync.Mutex
-
-func PlistPath() string {
-	return filepath.Join(paths.Home(), "Library", "LaunchAgents", Label+".plist")
+// Scheduling belongs to the long-lived UI process. No OS task is registered.
+type Controller struct {
+	mu        sync.Mutex
+	ctx       context.Context
+	trigger   func() bool
+	started   bool
+	enabled   bool
+	at        string
+	next      time.Time
+	lastError string
 }
-func Program() []string {
-	exe, err := os.Executable()
-	if err != nil {
-		exe = paths.Binary()
-	}
-	if strings.Contains(exe, "go-build") || strings.HasSuffix(exe, ".test") {
-		if _, err = os.Stat(paths.Binary()); err == nil {
-			exe = paths.Binary()
-		}
-	}
-	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
-		exe = resolved
-	}
-	return []string{exe, "run"}
+
+func New(ctx context.Context, trigger func() bool) *Controller {
+	return &Controller{ctx: ctx, trigger: trigger}
 }
-func xmlText(s string) string { var b bytes.Buffer; xml.EscapeText(&b, []byte(s)); return b.String() }
-func RenderPlist(at string, args []string, root string) string {
+
+func NextRun(now time.Time, at string) time.Time {
 	var hour, minute int
 	fmt.Sscanf(at, "%d:%d", &hour, &minute)
-	program := []string{}
-	for _, arg := range args {
-		program = append(program, "        <string>"+xmlText(arg)+"</string>")
+	next := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location())
+	if !next.After(now) {
+		next = time.Date(now.Year(), now.Month(), now.Day()+1, hour, minute, 0, 0, now.Location())
 	}
-	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-    <key>Label</key><string>%s</string>
-    <key>ProgramArguments</key><array>
-%s
-    </array>
-    <key>WorkingDirectory</key><string>%s</string>
-    <key>StartCalendarInterval</key><dict><key>Hour</key><integer>%d</integer><key>Minute</key><integer>%d</integer></dict>
-    <key>RunAtLoad</key><false/>
-    <key>StandardOutPath</key><string>%s</string>
-    <key>StandardErrorPath</key><string>%s</string>
-    <key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string><key>CHECKIN_HOME</key><string>%s</string></dict>
-</dict></plist>
-`, Label, strings.Join(program, "\n"), xmlText(root), hour, minute, xmlText(filepath.Join(root, "logs", "launchd.out.log")), xmlText(filepath.Join(root, "logs", "launchd.err.log")), xmlText(root))
+	return next
 }
-func command(ctx context.Context, name string, args ...string) (string, error) {
-	wait, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	data, err := exec.CommandContext(wait, name, args...).CombinedOutput()
-	return strings.TrimSpace(string(data)), err
-}
-func Install(ctx context.Context) (bool, string) {
-	mu.Lock()
-	defer mu.Unlock()
-	if runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
-		return false, "当前平台暂不支持内置定时任务，请用 cron 调用 checkin run"
-	}
-	if err := paths.Ensure(); err != nil {
-		return false, err.Error()
+
+// A due execution is retried while the shared run queue is busy.
+func (s *Controller) tick(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ctx.Err() != nil {
+		return
 	}
 	cfg, _, err := config.Load()
 	if err != nil {
-		return false, err.Error()
+		s.lastError = err.Error()
+		return
 	}
-	args := Program()
-	if strings.Contains(args[0], "go-build") || strings.HasSuffix(args[0], ".test") {
-		return false, "请先 go build 并安装固定路径的二进制，再运行 schedule install"
-	}
-	if runtime.GOOS == "windows" {
-		return installWindows(ctx, cfg.Schedule.Time, args[0])
-	}
-	target := PlistPath()
-	if err = util.AtomicWrite(target, []byte(RenderPlist(cfg.Schedule.Time, args, paths.Root())), 0644); err != nil {
-		return false, err.Error()
-	}
-	domain := fmt.Sprintf("gui/%d", os.Getuid())
-	command(ctx, "launchctl", "bootout", domain, target)
-	output, err := command(ctx, "launchctl", "bootstrap", domain, target)
-	if err != nil {
-		legacy, legacyErr := command(ctx, "launchctl", "load", "-w", target)
-		if legacyErr != nil {
-			return false, "launchctl bootstrap 失败：" + output + "；load -w 亦失败：" + legacy
+	s.lastError = ""
+	if cfg.Schedule.Enabled != s.enabled || cfg.Schedule.Time != s.at {
+		s.enabled, s.at = cfg.Schedule.Enabled, cfg.Schedule.Time
+		s.next = time.Time{}
+		if s.enabled {
+			s.next = NextRun(now, s.at)
 		}
 	}
-	return true, fmt.Sprintf("已安装定时任务 %s（每天 %s 执行），plist：%s", Label, cfg.Schedule.Time, target)
+	if s.enabled && !s.next.IsZero() && !now.Before(s.next) && s.trigger() {
+		logx.Info("程序内定时任务已触发（每天 %s；退出程序后停止）", s.at)
+		s.next = NextRun(now, s.at)
+	}
 }
-func Uninstall(ctx context.Context) (bool, string) {
-	mu.Lock()
-	defer mu.Unlock()
-	if runtime.GOOS == "windows" {
-		return uninstallWindows(ctx)
+
+func (s *Controller) Start() {
+	s.mu.Lock()
+	if s.started {
+		s.mu.Unlock()
+		return
 	}
-	if runtime.GOOS != "darwin" {
-		return false, "当前平台暂不支持内置定时任务"
-	}
-	target := PlistPath()
-	if _, err := os.Stat(target); os.IsNotExist(err) {
-		return true, "未安装定时任务（plist 不存在）"
-	}
-	command(ctx, "launchctl", "bootout", fmt.Sprintf("gui/%d", os.Getuid()), target)
-	command(ctx, "launchctl", "unload", "-w", target)
-	if err := os.Remove(target); err != nil {
-		return false, "删除 plist 失败：" + err.Error()
-	}
-	return true, "已卸载定时任务 " + Label
-}
-func Status(ctx context.Context) util.M {
-	mu.Lock()
-	defer mu.Unlock()
-	cfg, _, _ := config.Load()
-	args := Program()
-	info := util.M{"installed": false, "plist": PlistPath(), "config_time": cfg.Schedule.Time, "plist_time": nil, "loaded": false, "program": args, "log_out": filepath.Join(paths.Logs(), "launchd.out.log"), "log_err": filepath.Join(paths.Logs(), "launchd.err.log")}
-	if runtime.GOOS == "windows" {
-		return windowsStatus(ctx, info)
-	}
-	if runtime.GOOS != "darwin" {
-		return info
-	}
-	_, err := os.Stat(PlistPath())
-	if err != nil {
-		return info
-	}
-	info["installed"] = true
-	data, err := command(ctx, "plutil", "-convert", "json", "-o", "-", "--", PlistPath())
-	var plist util.M
-	if err != nil {
-		info["error"] = "plist 解析失败：" + data
-	} else if utilJSON(data, &plist) == nil {
-		interval := util.Map(plist["StartCalendarInterval"])
-		info["plist_time"] = fmt.Sprintf("%02d:%02d", int(util.Float(interval["Hour"])), int(util.Float(interval["Minute"])))
-		if program, ok := plist["ProgramArguments"].([]any); ok {
-			info["program"] = program
+	s.started = true
+	s.mu.Unlock()
+	s.tick(time.Now())
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-s.ctx.Done():
+				return
+			case now := <-ticker.C:
+				s.tick(now)
+			}
 		}
-		info["run_at_load"] = util.Truth(plist["RunAtLoad"])
-	}
-	output, err := command(ctx, "launchctl", "list", Label)
-	info["loaded"] = err == nil
-	if len(output) > 200 {
-		output = output[:200]
-	}
-	info["launchctl_output"] = output
-	return info
+	}()
 }
+
+func (s *Controller) Refresh() { s.tick(time.Now()) }
+
+func Status(context.Context) util.M {
+	cfg, _, err := config.Load()
+	view := util.M{"enabled": cfg.Schedule.Enabled, "running": false, "mode": "process", "backend": "程序内定时", "config_time": cfg.Schedule.Time, "nextAt": nil, "nextText": "", "message": "仅在 checkin ui 进程运行期间执行；退出程序后停止"}
+	if err != nil {
+		view["error"] = err.Error()
+	}
+	return view
+}
+
+func (s *Controller) Status() util.M {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	view := Status(s.ctx)
+	view["running"] = s.started && s.enabled && s.ctx.Err() == nil
+	if view["running"] == true && !s.next.IsZero() {
+		view["nextAt"] = s.next.Unix()
+		view["nextText"] = s.next.Format("2006-01-02 15:04:05 MST")
+	}
+	if s.lastError != "" {
+		view["error"] = s.lastError
+	}
+	return view
+}
+
+func SetEnabled(ctx context.Context, enabled bool) (bool, string) {
+	if _, err := RemoveLegacy(ctx); err != nil {
+		return false, err.Error()
+	}
+	if ok, msg := config.Set("schedule.enabled", enabled); !ok {
+		return false, msg
+	}
+	if enabled {
+		return true, "已启用程序内定时；保持 checkin ui 运行，退出程序后停止"
+	}
+	return true, "已关闭定时签到"
+}
+
+// Compatibility aliases no longer install a system background task.
+func Install(ctx context.Context) (bool, string)   { return SetEnabled(ctx, true) }
+func Uninstall(ctx context.Context) (bool, string) { return SetEnabled(ctx, false) }

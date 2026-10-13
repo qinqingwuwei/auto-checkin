@@ -37,15 +37,20 @@ type Server struct {
 	startedAt, finishedAt *float64
 	report                any
 	lines                 []string
-	scheduleMu            sync.Mutex
-	scheduleCache         util.M
-	scheduleAt            time.Time
+	Schedule              *scheduler.Controller
+	Stop                  context.CancelFunc
 	Execute               func(context.Context, runner.Options) (runner.Report, error)
+	Auth                  AuthOperations
+	accountAction         AccountAction
+	authCancel            context.CancelFunc
+	smsNext               time.Time
 	ctx                   context.Context
 }
 
 func New(ctx context.Context) *Server {
-	return &Server{lines: []string{}, Execute: runner.Execute, ctx: ctx}
+	s := &Server{lines: []string{}, Execute: runner.Execute, Auth: defaultAuth(), ctx: ctx}
+	s.Schedule = scheduler.New(ctx, func() bool { return s.start(false, false) })
+	return s
 }
 func (s *Server) RunSnapshot() util.M {
 	s.mu.Lock()
@@ -54,7 +59,7 @@ func (s *Server) RunSnapshot() util.M {
 }
 func (s *Server) start(dry, force bool) bool {
 	s.mu.Lock()
-	if s.running {
+	if s.ctx.Err() != nil || s.running || s.accountAction.Running {
 		s.mu.Unlock()
 		return false
 	}
@@ -89,14 +94,7 @@ func (s *Server) start(dry, force bool) bool {
 	return true
 }
 func (s *Server) scheduleStatus(ctx context.Context) util.M {
-	s.scheduleMu.Lock()
-	defer s.scheduleMu.Unlock()
-	if s.scheduleCache != nil && time.Since(s.scheduleAt) < 10*time.Second {
-		return s.scheduleCache
-	}
-	s.scheduleCache = scheduler.Status(ctx)
-	s.scheduleAt = time.Now()
-	return s.scheduleCache
+	return s.Schedule.Status()
 }
 func (s *Server) StatusPayload(ctx context.Context) (util.M, error) {
 	stored := util.ReadMap(paths.State())
@@ -120,7 +118,7 @@ func (s *Server) StatusPayload(ctx context.Context) (util.M, error) {
 	traeView := trae.CredentialStatus(ctx)
 	traeView["remain"] = util.Remain(traeView["sessionExpires"])
 	traeView["sessionExpiresText"] = util.Timestamp(traeView["sessionExpires"])
-	return util.M{"version": version.Version, "date": util.Today(), "now": util.Now(), "stateDir": paths.Root(), "state": stored, "products": productRows(stored, usernames), "credentials": util.M{"trae": traeView, "workbuddy": accounts}, "points": state.Latest(history), "history": history, "config": config.Masked(cfg), "configWarnings": warnings, "secretsSet": util.M{"notify.dingtalk.webhook": cfg.Notify.Dingtalk.Webhook != "", "notify.dingtalk.secret": cfg.Notify.Dingtalk.Secret != ""}, "dingtalk": util.M{"ready": ready, "reason": reason}, "schedule": s.scheduleStatus(ctx), "run": s.RunSnapshot()}, nil
+	return util.M{"version": version.Version, "date": util.Today(), "now": util.Now(), "stateDir": paths.Root(), "state": stored, "products": productRows(stored, usernames), "credentials": util.M{"trae": traeView, "workbuddy": accounts}, "auth": s.AuthSnapshot(), "points": state.Latest(history), "history": history, "config": config.Masked(cfg), "configWarnings": warnings, "secretsSet": util.M{"notify.dingtalk.webhook": cfg.Notify.Dingtalk.Webhook != "", "notify.dingtalk.secret": cfg.Notify.Dingtalk.Secret != ""}, "dingtalk": util.M{"ready": ready, "reason": reason}, "schedule": s.scheduleStatus(ctx), "run": s.RunSnapshot()}, nil
 }
 func hostOK(host string) bool {
 	host = strings.ToLower(strings.TrimSpace(host))
@@ -184,6 +182,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				lines = 5000
 			}
 			writeJSON(w, 200, util.M{"lines": logx.Tail(lines), "path": paths.Log()})
+		case "/api/auth/status":
+			writeJSON(w, 200, s.AuthSnapshot())
 		default:
 			writeJSON(w, 404, util.M{"error": "未知路径"})
 		}
@@ -208,6 +208,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		payload = util.M{}
 	}
 	switch r.URL.Path {
+	case "/api/quit":
+		if s.Stop == nil {
+			writeJSON(w, 503, util.M{"error": "当前服务无法退出"})
+			return
+		}
+		writeJSON(w, 200, util.M{"ok": true, "message": "程序正在退出，定时任务已停止"})
+		s.Stop()
+	case "/api/auth/login", "/api/auth/sms", "/api/auth/logout", "/api/auth/cancel":
+		s.handleAuth(w, r, payload)
 	case "/api/run":
 		started := s.start(util.Truth(payload["dry_run"]), util.Truth(payload["force"]))
 		status := 200
@@ -223,6 +232,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ok, msg := config.Set(key, value)
+		if ok && strings.HasPrefix(key, "schedule.") {
+			s.Schedule.Refresh()
+		}
 		status := 200
 		if !ok {
 			status = 400
@@ -232,17 +244,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		action := util.String(payload["action"])
 		var ok bool
 		var msg string
-		if action == "install" {
+		if action == "enable" || action == "install" {
 			ok, msg = scheduler.Install(r.Context())
-		} else if action == "uninstall" {
+		} else if action == "disable" || action == "uninstall" {
 			ok, msg = scheduler.Uninstall(r.Context())
 		} else {
-			writeJSON(w, 400, util.M{"ok": false, "message": "action 应为 install / uninstall"})
+			writeJSON(w, 400, util.M{"ok": false, "message": "action 应为 enable / disable"})
 			return
 		}
-		s.scheduleMu.Lock()
-		s.scheduleCache = nil
-		s.scheduleMu.Unlock()
+		s.Schedule.Refresh()
 		status := 200
 		if !ok {
 			status = 500
@@ -271,15 +281,22 @@ func Bind(port int) (net.Listener, int, error) {
 	return nil, 0, fmt.Errorf("端口 %d 起的 %d 个端口均不可用：%w", port, tries, last)
 }
 func Serve(ctx context.Context, port int, openBrowser bool) error {
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
 	if err := paths.Ensure(); err != nil {
 		return err
+	}
+	if message, err := scheduler.RemoveLegacy(ctx); err != nil {
+		return err
+	} else if message != "" {
+		fmt.Println(message)
 	}
 	listener, chosen, err := Bind(port)
 	if err != nil {
 		return err
 	}
 	url := fmt.Sprintf("http://127.0.0.1:%d/", chosen)
-	fmt.Printf("本地看板已启动：%s（仅本机可访问，Ctrl+C 停止）\n", url)
+	fmt.Printf("本地看板已启动：%s（仅本机可访问，Ctrl+C 或页面「退出程序」停止；定时随进程启停）\n", url)
 	if openBrowser {
 		launch, cancel := context.WithTimeout(ctx, 20*time.Second)
 		opened := util.OpenBrowser(launch, url)
@@ -288,20 +305,30 @@ func Serve(ctx context.Context, port int, openBrowser bool) error {
 			fmt.Printf("未能自动打开浏览器，请手动访问：%s\n", url)
 		}
 	}
-	server := &http.Server{Handler: New(ctx), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second}
+	app := New(ctx)
+	app.Stop = stop
+	app.Schedule.Start()
+	server := &http.Server{Handler: app, BaseContext: func(net.Listener) context.Context { return ctx }, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second}
 	done := make(chan struct{})
+	shutdownDone := make(chan struct{})
 	defer close(done)
 	go func() {
+		defer close(shutdownDone)
 		select {
 		case <-ctx.Done():
 			wait, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			server.Shutdown(wait)
+			if err := server.Shutdown(wait); err != nil {
+				server.Close()
+			}
 		case <-done:
 		}
 	}()
 	err = server.Serve(listener)
 	if errors.Is(err, http.ErrServerClosed) {
+		// Serve returns as soon as Shutdown closes the listener. Wait for
+		// handlers to flush /api/quit before main exits the process.
+		<-shutdownDone
 		fmt.Println("看板已停止")
 		return nil
 	}
