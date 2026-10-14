@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"checkin/internal/fileperm"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -218,6 +219,17 @@ func Remain(v any) string {
 	}
 	return fmt.Sprintf("%.1f 天后过期", delta/86400)
 }
+// UUID4 生成随机 UUID v4 字符串，用于设备标识首次生成。
+func UUID4() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("fallback-%d", time.Now().UnixNano())
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
 func ReadJSON(path string, dst any) error {
 	data, err := os.ReadFile(path)
 	if err != nil {

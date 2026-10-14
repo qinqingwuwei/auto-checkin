@@ -28,6 +28,7 @@ func Logs() string           { return filepath.Join(Root(), "logs") }
 func Log() string            { return filepath.Join(Logs(), "checkin.log") }
 func Credentials() string    { return filepath.Join(Root(), "credentials") }
 func TraeCred() string       { return filepath.Join(Credentials(), "trae.json") }
+func TraeDevice() string     { return filepath.Join(Credentials(), "trae-device.json") }
 func WorkBuddyCreds() string { return filepath.Join(Credentials(), "workbuddy") }
 func TraeProfile() string    { return filepath.Join(Root(), "browser", "trae") }
 func TraeCookies() string    { return filepath.Join(Root(), "browser", "trae-cookies.json") }

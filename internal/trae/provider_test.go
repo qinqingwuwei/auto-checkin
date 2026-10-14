@@ -18,15 +18,17 @@ import (
 )
 
 func TestTraeWireProtocolAndLedger(t *testing.T) {
+	t.Setenv("CHECKIN_HOME", t.TempDir())
+	paths.Ensure()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" || r.Header.Get("Authorization") != "Cloud-IDE-JWT test-token" || r.Header.Get("X-User-Region") != "cn" || r.Header.Get("trae_client") != "IDE" {
+		if r.Method != "POST" || r.Header.Get("Authorization") != "Cloud-IDE-JWT test-token" || r.Header.Get("X-User-Region") != "cn" || r.Header.Get("trae_client") != "IDE" || r.Header.Get("X-Device-Id") == "" {
 			t.Errorf("bad request method/headers: %s", r.Method)
 		}
 		var body util.M
 		json.NewDecoder(r.Body).Decode(&body)
 		switch r.URL.Path {
 		case StatusPath, ClaimPath:
-			if body["client_version"] != "3.4.2" || body["trae_client"] != "IDE" || body["req_source"] != float64(1) {
+			if body["client_version"] != "3.4.2" || body["trae_client"] != "IDE" || body["req_source"] != float64(1) || body["device_id"] == "" || body["device_id"] == nil {
 				t.Errorf("bad checkin payload %v", body)
 			}
 			if r.URL.Path == StatusPath {

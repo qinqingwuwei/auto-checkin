@@ -48,6 +48,7 @@ var Keys = []string{"schedule.time", "schedule.enabled", "expiry_warning_days", 
 func Defaults() Config {
 	var c Config
 	c.Schedule.Time = "08:00"
+	c.Schedule.Enabled = true
 	c.ExpiryWarningDays = 7
 	c.Notify.Dingtalk.Enabled = true
 	c.Notify.Local.Enabled = true

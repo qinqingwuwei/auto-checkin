@@ -150,7 +150,15 @@ func CredentialStatus(ctx context.Context) util.M {
 	return util.M{"configured": util.Truth(cred["session"]), "source": util.Or(cred["source"], "-"), "sessionExpires": cred["sessionExpires"], "jwtExp": cred["jwtExp"], "loginAt": cred["loginAt"], "savedAt": cred["savedAt"], "username": info["username"], "phone": info["phone"], "avatar": info["avatar"]}
 }
 func Account() string {
-	cred := Load()
-	data := util.Map(util.JWTPayload(util.String(cred["jwt"]))["data"])
-	return util.String(util.Or(data["id"], data["user_id"], data["tid"], "-"))
+	id := accountOf(util.String(Load()["jwt"]))
+	if id == "" {
+		return "-"
+	}
+	return id
+}
+
+// accountOf 从 JWT 的 data 段取账号标识，用于绑定稳定设备标识。
+func accountOf(token string) string {
+	data := util.Map(util.JWTPayload(token)["data"])
+	return util.String(util.Or(data["id"], data["user_id"], data["tid"], ""))
 }
