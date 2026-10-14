@@ -121,7 +121,7 @@ func Main(ctx context.Context, args []string) int {
 			return code
 		}
 		if err := web.Serve(ctx, *port, !*noOpen); err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			logx.Error("本地看板启动失败：%s", err)
 			return 1
 		}
 		return 0

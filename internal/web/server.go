@@ -287,7 +287,9 @@ func Serve(ctx context.Context, port int, openBrowser bool) error {
 		return err
 	}
 	if message, err := scheduler.RemoveLegacy(ctx); err != nil {
-		return err
+		// 清理旧版系统任务只是升级迁移动作，失败不应阻止本地看板启动：
+		// 否则双击运行时会直接退出、WebUI 无法访问。失败信息落盘并回显。
+		logx.Warn("清理旧版系统定时任务失败（不影响看板启动）：%s", err)
 	} else if message != "" {
 		fmt.Println(message)
 	}

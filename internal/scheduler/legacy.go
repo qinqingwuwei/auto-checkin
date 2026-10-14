@@ -101,8 +101,13 @@ func RemoveLegacy(ctx context.Context) (string, error) {
 	case "windows":
 		output, err := legacyCommand(ctx, "schtasks", "/Query", "/TN", WindowsName, "/XML")
 		if err != nil {
-			text := strings.ToLower(output)
-			if strings.Contains(text, "cannot find the file specified") || strings.Contains(text, "找不到指定的文件") {
+			// 任务不存在时 schtasks 以非零退出，输出的错误文案随系统语言和代码页变化
+			// （中文系统是 GBK，与 Go 里的 UTF-8 字面量不匹配），不能靠匹配固定字符串判断。
+			// 改用整表列举区分「任务不存在」与「查询本身失败」：任务名是 ASCII，跨语言稳定。
+			listing, listErr := legacyCommand(ctx, "schtasks", "/Query", "/FO", "CSV", "/NH")
+			// 列举输出在中文系统上是 OEM 代码页，重定向到管道时也可能是 UTF-16：
+			// 两者都不影响 ASCII 任务名，只需去掉 UTF-16 会引入的 NUL 字节即可可靠匹配。
+			if listErr == nil && !strings.Contains(strings.ReplaceAll(listing, "\x00", ""), WindowsName) {
 				return "", nil
 			}
 			return "", fmt.Errorf("无法检查旧版任务 %s：%s", WindowsName, output)
