@@ -4,6 +4,7 @@ import (
 	"checkin/internal/fileperm"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -30,8 +31,21 @@ func Credentials() string    { return filepath.Join(Root(), "credentials") }
 func TraeCred() string       { return filepath.Join(Credentials(), "trae.json") }
 func TraeDevice() string     { return filepath.Join(Credentials(), "trae-device.json") }
 func WorkBuddyCreds() string { return filepath.Join(Credentials(), "workbuddy") }
-func TraeProfile() string    { return filepath.Join(Root(), "browser", "trae") }
-func TraeCookies() string    { return filepath.Join(Root(), "browser", "trae-cookies.json") }
+func TraeProfile() string     { return filepath.Join(Root(), "browser", "trae") }
+func TraeCookies() string     { return filepath.Join(Root(), "browser", "trae-cookies.json") }
+
+// TraeIDEDevice 指向 Trae CN 客户端本机数据目录里 ahanet 网络栈写的配置，
+// 其中 device_id 即客户端发请求时携带的 x-device-id。文件不存在时调用方需回退。
+func TraeIDEDevice() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return filepath.Join(Home(), "Library", "Application Support", "Trae CN", "ahanet", "tt_net_config.config")
+	case "windows":
+		return filepath.Join(os.Getenv("APPDATA"), "Trae CN", "ahanet", "tt_net_config.config")
+	default:
+		return filepath.Join(Home(), ".config", "Trae CN", "ahanet", "tt_net_config.config")
+	}
+}
 func LegacyTrae() string     { return filepath.Join(Root(), "trae-web-state.json") }
 func LegacyWorkBuddy() []string {
 	return []string{filepath.Join(Root(), "workbuddy-sms.json"), filepath.Join(Root(), "workbuddy-oauth.json")}

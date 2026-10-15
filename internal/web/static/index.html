@@ -218,6 +218,7 @@ body{
 }
 .balance .unit{font-size:12px;color:var(--text-3);letter-spacing:.06em}
 .delta{font-size:13px;font-weight:500;color:var(--green);margin-bottom:16px;min-height:18px;font-variant-numeric:tabular-nums}
+.delta.err{color:var(--red)}
 .metrics{
   display:grid;grid-template-columns:repeat(3,1fr);gap:10px;
   border-top:1px solid var(--line);padding-top:14px;margin:0 0 14px;
@@ -235,6 +236,12 @@ body{
 }
 .card-foot .msg{flex:1 1 100%;color:var(--text-2)}
 .card.empty{opacity:.75}
+.card-action{display:flex;gap:8px;margin:2px 0 12px}
+.card-action .btn{flex:1}
+.live-tag{
+  font-size:11px;color:var(--text-3);font-family:var(--mono);
+  font-variant-numeric:tabular-nums;letter-spacing:0;
+}
 
 /* ------------------------------------------------------------------ 面板 */
 .panel{
@@ -417,6 +424,7 @@ footer code{font-family:var(--mono);font-size:11px}
       <a class="nav-link" href="#sec-run">手动执行</a>
       <a class="nav-link" href="#sec-chart">积分曲线</a>
       <a class="nav-link" href="#sec-config">配置</a>
+      <a class="nav-link" href="#sec-update">版本</a>
       <a class="nav-link" href="#sec-log">日志</a>
     </nav>
     <div class="nav-right">
@@ -455,7 +463,8 @@ footer code{font-family:var(--mono);font-size:11px}
             <button class="btn primary small" id="trae-login" data-account-control type="button">浏览器登录</button>
             <button class="btn ghost small danger" id="trae-logout" data-account-control type="button" hidden>登出</button>
           </div>
-          <p class="hint" style="margin-top:12px">打开独立浏览器窗口，请在 8 分钟内完成登录。</p>
+          <p class="hint" id="trae-login-hint" style="margin-top:12px">打开独立浏览器窗口，请在 8 分钟内完成登录。</p>
+          <p class="hint" id="trae-note" style="margin-top:12px;color:var(--orange)" hidden>Trae 签到与设备绑定，本机仅支持登录一个账号；如需更换账号，请先点「登出」再登录。</p>
         </div>
         <div class="account-box">
           <h3>WorkBuddy</h3>
@@ -529,6 +538,20 @@ footer code{font-family:var(--mono);font-size:11px}
       </div>
       <pre class="log" id="log">…</pre>
     </section>
+
+    <section class="panel reveal" style="--d:3.7" id="sec-update">
+      <div class="panel-head">
+        <h2>版本更新</h2>
+        <div class="ctl">
+          <button class="btn ghost small" id="btn-update-check" type="button">检查更新</button>
+          <button class="btn primary small" id="btn-update-apply" type="button" hidden>一键更新</button>
+        </div>
+      </div>
+      <div class="sched-line"><span>当前版本 <code id="ver-current">—</code></span>
+        <span class="hint" id="ver-latest">正在检查…</span></div>
+      <p class="hint" id="ver-notes" hidden style="white-space:pre-wrap;max-height:220px;overflow:auto;margin-top:8px"></p>
+      <p class="hint" style="margin-top:8px">更新会下载新版本、替换当前程序并自动重启；仓库 <code id="ver-repo">qinqingwuwei/auto-checkin</code>（公开，直接读取 GitHub 发布）。</p>
+    </section>
   </main>
 
   <footer>
@@ -592,6 +615,17 @@ function statusPill(row, today){
   if(row.status === "skip") return ['warn', '已跳过'];
   return ['warn', '今日未执行'];
 }
+/* 实时积分：/api/points 接口直读，节流刷新（历史快照只在成功执行后追加，会滞后）。 */
+let livePoints = new Map(), pointsAt = 0, pointsBusy = false, signLabels = new Map(), lastStatus = null;
+const POINTS_TTL = 25;  // 秒
+function targetKey(product, account){
+  // 与后端 runTargets / productRows 的 key 对齐：trae / workbuddy:<uid>
+  return product === "trae" ? "trae" : `workbuddy:${account ?? "unknown"}`;
+}
+function fmtTime(epoch){
+  const d = new Date(epoch*1000);
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
 function buildModels(data){
   const ptsBy = new Map();
   (data.points || []).forEach(r => ptsBy.set(`${r.product}|${r.account ?? "-"}`, r));
@@ -600,7 +634,8 @@ function buildModels(data){
   (data.products || []).forEach(p => {
     const k = `${p.product}|${p.account ?? "-"}`;
     seen.add(k);
-    models.push({row:p, pts:ptsBy.get(k) || null,
+    models.push({row:p, target:String(p.key || targetKey(p.product, p.account)),
+                 pts:ptsBy.get(k) || null,
                  cred:credFor(data.credentials || {}, p.product, p.account)});
   });
   (data.points || []).forEach(r => {
@@ -609,24 +644,36 @@ function buildModels(data){
     const label = r.product === "trae" ? "Trae CN"
       : `WorkBuddy (${String(r.account || "").slice(0,8)}…)`;
     models.push({row:{product:r.product, account:r.account, label, status:"none"},
-                 pts:r, cred:credFor(data.credentials || {}, r.product, r.account)});
+                 target:targetKey(r.product, r.account), pts:r,
+                 cred:credFor(data.credentials || {}, r.product, r.account)});
   });
   return models;
 }
 function renderCards(data){
   const wrap = $("#cards");
   const models = buildModels(data);
+  signLabels = new Map();
   if(!models.length){
     wrap.innerHTML = `<article class="card empty"><div class="card-top"><div class="card-title"><h3>暂无记录</h3></div>
       <span class="pill">未执行</span></div>
       <p class="hint">还没有执行记录。先在下方「账号登录」中登录，再点「立即执行」。</p></article>`;
     return;
   }
-  wrap.innerHTML = models.map(({row, pts, cred}) => {
+  wrap.innerHTML = models.map(({row, pts, cred, target}) => {
     const tone = row.product === "trae" ? "tone-trae" : "tone-workbuddy";
     const [cls, text] = statusPill(row, data.date);
-    const bal = pts && typeof pts.balance === "number" ? fmtNum(pts.balance) : "—";
-    const delta = pts && pts.credit_today ? `今日 +${fmtNum(pts.credit_today)}` : "";
+    const live = livePoints.get(target) || null;
+    // 余额优先取实时接口；接口失败时回退到最近一次成功执行的快照。
+    const src = (live && typeof live.balance === "number") ? live : pts;
+    const bal = src && typeof src.balance === "number" ? fmtNum(src.balance) : "—";
+    const liveTag = (live && typeof live.balance === "number")
+      ? `<span class="live-tag"> · 实时 ${pointsAt ? fmtTime(pointsAt) : ""}</span>`
+      : (src ? `<span class="live-tag"> · 快照</span>` : "");
+    const signedToday = row.successDate === data.date;
+    let delta = "", deltaErr = false;
+    if(signedToday && typeof row.creditToday === "number" && row.creditToday > 0)
+      delta = `今日 +${fmtNum(row.creditToday)}`;  // 只有当天真的成功入账才显示，9074 等失败当天不误报
+    if(live && live.error){ delta = `实时积分读取失败：${live.error}`; deltaErr = true; }
     const hot = v => (typeof v === "number" && v > 0) ? "hot" : "";
     const foot = [];
     if(row.at) foot.push(`最近 ${row.at}`);
@@ -641,6 +688,10 @@ function renderCards(data){
     const baseName = isTrae ? "Trae CN" : "WorkBuddy";
     // 副标题：昵称优先（后端凭据解码），WB 多账号回退 uid 截断
     const sub = (cred && cred.username) || (isTrae ? "" : `${String(row.account || "").slice(0,8)}…`);
+    signLabels.set(target, row.label || baseName);
+    const action = (!signedToday && !runBusy && target)
+      ? `<div class="card-action"><button class="btn primary small" data-sign="${escapeHtml(target)}" type="button">立即签到</button></div>`
+      : "";
     return `<article class="card ${tone}">
       <div class="card-top">
         <div class="card-title">
@@ -652,20 +703,55 @@ function renderCards(data){
         </div>
         <span class="pill ${cls}"><i></i>${text}</span>
       </div>
-      <div class="balance"><span class="num">${bal}</span><span class="unit">积分余额</span></div>
-      <div class="delta">${delta}</div>
+      <div class="balance"><span class="num">${bal}</span><span class="unit">积分余额${liveTag}</span></div>
+      <div class="delta${deltaErr ? " err" : ""}">${escapeHtml(delta)}</div>
       <dl class="metrics">
-        <div><dt>${pts && pts.expiring_days != null ? pts.expiring_days : 7} 天内到期</dt>
-             <dd class="${pts ? hot(pts.expiring_amount) : ""}">${pts ? fmtNum(pts.expiring_amount) : "—"}</dd></div>
-        <div><dt>30 天内到期</dt><dd>${pts ? fmtNum(pts.expiring_30d) : "—"}</dd></div>
-        <div><dt>积分批次</dt><dd>${pts && pts.batch_count != null ? pts.batch_count : "—"}</dd></div>
+        <div><dt>${src && src.expiring_days != null ? src.expiring_days : 7} 天内到期</dt>
+             <dd class="${src ? hot(src.expiring_amount) : ""}">${src ? fmtNum(src.expiring_amount) : "—"}</dd></div>
+        <div><dt>30 天内到期</dt><dd>${src ? fmtNum(src.expiring_30d) : "—"}</dd></div>
+        <div><dt>积分批次</dt><dd>${src && src.batch_count != null ? src.batch_count : "—"}</dd></div>
       </dl>
+      ${action}
       <footer class="card-foot">
         ${foot.map(x => `<span>${escapeHtml(String(x))}</span>`).join("")}
         ${row.message ? `<span class="msg">${escapeHtml(row.message)}</span>` : ""}
       </footer>
     </article>`;
   }).join("");
+  wrap.querySelectorAll("[data-sign]").forEach(btn =>
+    btn.addEventListener("click", () => signOne(btn.dataset.sign, btn)));
+}
+/* 单卡片「立即签到」：只跑一个目标（trae / workbuddy:<uid>），不影响其它账号。 */
+async function signOne(target, btn){
+  if(runBusy || authBusy || authPending || exited || !target) return;
+  const label = signLabels.get(target) || target;
+  if(!confirm(`将对「${label}」单独执行一次签到（未签到时领取积分），继续？`)) return;
+  if(btn) btn.disabled = true;
+  try{
+    const res = await api("POST", "/api/run", {only:[target]});
+    if(res.__status === 409){ toast(res.error || "已有一次执行正在进行中"); if(btn) btn.disabled = false; return; }
+    if(res.error && !res.started){ toast(res.error); if(btn) btn.disabled = false; return; }
+    renderRun(res.run);
+    schedule(1200);
+  }catch(err){ toast("签到失败：" + err.message); if(btn) btn.disabled = false; }
+}
+/* 拉取实时积分：与签到/账号操作互斥，节流 25 秒，成功后就地重绘卡片。 */
+async function loadPoints(force){
+  if(exited || pointsBusy) return;
+  if(!force && pointsAt && Date.now()/1000 - pointsAt < POINTS_TTL) return;
+  pointsBusy = true;
+  try{
+    const res = await api("GET", "/api/points");
+    if(exited) return;
+    if(res.items){
+      const map = new Map();
+      res.items.forEach(r => map.set(String(r.key), r));
+      livePoints = map;
+      pointsAt = typeof res.updatedAt === "number" ? res.updatedAt : Date.now()/1000;
+      if(lastStatus) renderCards(lastStatus);
+    }
+  }catch(_){ }
+  finally{ pointsBusy = false; }
 }
 function escapeHtml(s){
   return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -710,8 +796,16 @@ function renderAccounts(data){
   if(signature !== accountSignature){
     accountSignature = signature;
     const trae = credentials.trae || {};
-    $("#trae-account").textContent = trae.configured ? `${trae.username || "已保存登录会话"} · 会话${trae.remain || "有效期未知"}` : "尚未登录";
+    // 签到与设备标识绑定：已有可用（未过期）会话时隐藏登录入口，并给出提示文案。
+    const traeLocked = !!trae.configured && !trae.expired;
+    $("#trae-account").textContent = !trae.configured ? "尚未登录"
+      : (trae.expired ? `会话已过期（${trae.loginMethod || "-"}），请重新登录`
+                      : `${trae.username || "已保存登录会话"} · 会话${trae.remain || "有效期未知"}`);
     $("#trae-logout").hidden = !trae.configured;
+    $("#trae-login").hidden = traeLocked;
+    $("#trae-channel").hidden = traeLocked;
+    $("#trae-login-hint").hidden = traeLocked;
+    $("#trae-note").hidden = !traeLocked;
     const accounts = credentials.workbuddy || [];
     $("#wb-accounts").innerHTML = accounts.length ? accounts.map(c =>
       `<div class="account-row"><span>${escapeHtml(c.username || c.shortUid)} · ${c.expired ? "凭据过期，请重新登录" : escapeHtml(c.remain || "有效期未知")}</span>
@@ -836,7 +930,7 @@ const CFG_SPEC = [
   {key:"notify.dingtalk.enabled", label:"钉钉通知", type:"bool"},
   {key:"notify.dingtalk.webhook", label:"钉钉 Webhook", type:"secret", hint:"留空 = 不修改"},
   {key:"notify.dingtalk.secret", label:"钉钉加签 Secret", type:"secret", hint:"留空 = 不修改"},
-  {key:"notify.local.enabled", label:"macOS 系统通知", type:"bool"},
+  {key:"notify.local.enabled", label:"系统通知（macOS / Windows）", type:"bool"},
   {key:"notify.daily_summary", label:"每日成功简报", type:"bool", hint:"默认只在异常与预警时推送"},
   {key:"products.trae.enabled", label:"参与签到 · Trae CN", type:"bool"},
   {key:"products.workbuddy.enabled", label:"参与签到 · WorkBuddy", type:"bool"},
@@ -1022,6 +1116,7 @@ async function refresh(quiet){
     const data = await api("GET", "/api/status");
     if(exited) return;
     if(data.error){ if(!quiet) toast(String(data.error)); return; }
+    lastStatus = data;
     $("#today").textContent = data.date || "—";
     $("#state-dir").textContent = data.stateDir || "~/.checkin/";
     renderCards(data);
@@ -1030,6 +1125,8 @@ async function refresh(quiet){
     renderConfig(data);
     renderRun(data.run);
     wasRunning = !!(data.run && data.run.running);
+    // 卡片余额改为接口直读的实时值（历史快照只在成功执行后追加，消耗积分后不会自动更新）。
+    if(!wasRunning && !authBusy) loadPoints(false);
     schedule(wasRunning || authBusy ? 1200 : 5000);
   }catch(err){
     if(!quiet) toast("无法连接本地服务：" + err.message);
@@ -1054,6 +1151,7 @@ updateRunButton();
 document.addEventListener("visibilitychange", () => { if(document.visibilityState === "visible" && !exited) refresh(true); });
 window.addEventListener("focus", () => { if(!exited) refresh(true); });
 $("#btn-quit").addEventListener("click", async () => {
+  if(!confirm("退出程序将关闭本地服务并停止定时签到，确定现在退出？")) return;
   try{
     const res = await api("POST", "/api/quit", {});
     if(!res.ok){ toast(res.error || "退出失败"); return; }
@@ -1061,17 +1159,92 @@ $("#btn-quit").addEventListener("click", async () => {
     clearTimeout(pollTimer); clearInterval(smsTimer);
     $("#btn-quit").disabled = true; $("#btn-refresh").disabled = true;
     $("#auth-spin").hidden = true; $("#auth-cancel").hidden = true; $("#auth-link").hidden = true;
-    $("#auth-message").textContent = "程序已退出，定时任务已停止。可关闭此页面。";
+    $("#auth-message").textContent = "程序已退出，定时任务已停止。";
     $("#run-state").textContent = "程序已退出";
     $("#run-spin").hidden = true;
     $("#cfg-rows").innerHTML = '<p class="hint">程序已退出，定时任务已停止。重新运行程序后可继续使用已保存的设置。</p>';
     updateAccountControls();
     document.querySelectorAll("button, input, select").forEach(el => { el.disabled = true; });
+    // 先尝试关闭本标签页；若本页不是脚本打开的外部标签页，浏览器会忽略该调用，改为提示手动关闭。
+    try{ window.close(); }catch(_){}
+    setTimeout(() => {
+      if(!document.hidden)
+        $("#auth-message").textContent = "程序已退出，定时任务已停止。若本标签页未自动关闭，请手动关闭（浏览器不允许脚本关闭非脚本打开的标签页）。";
+    }, 500);
     toast(res.message);
   }catch(err){ toast("退出失败：" + err.message); }
 });
 $("#btn-log").addEventListener("click", loadLog);
 $("#log-lines").addEventListener("change", loadLog);
+
+/* ------------------------------------------------------------------ 版本更新 */
+let updateInfo = null, updateBusy = false;
+function renderUpdate(info, error){
+  const latest = $("#ver-latest"), apply = $("#btn-update-apply");
+  if(!info){
+    latest.textContent = "检查失败：" + (error || "未知错误");
+    apply.hidden = true;
+    return;
+  }
+  $("#ver-current").textContent = info.current || "—";
+  if(info.hasUpdate){
+    latest.innerHTML = `发现新版本 <b>${escapeHtml(info.latest || "")}</b>${info.assetName ? `（${escapeHtml(info.assetName)}）` : ""}`;
+    apply.hidden = false; apply.disabled = false; apply.textContent = "一键更新";
+  }else{
+    latest.textContent = info.message || `已是最新版本${info.latest ? `（${info.latest}）` : ""}`;
+    apply.hidden = true;
+  }
+  const notes = $("#ver-notes");
+  if(info.notes){ notes.hidden = false; notes.textContent = info.notes; } else notes.hidden = true;
+}
+async function loadUpdate(force){
+  if(updateBusy || exited) return;
+  updateBusy = true;
+  if(force) $("#ver-latest").textContent = "正在检查…";
+  try{
+    const res = await api("GET", "/api/update" + (force ? "?refresh=1" : ""));
+    if(exited) return;
+    updateInfo = res.info || null;
+    renderUpdate(updateInfo, res.error || (res.__status !== 200 ? `HTTP ${res.__status}` : ""));
+  }catch(err){ renderUpdate(null, err.message); }
+  finally{ updateBusy = false; }
+}
+// 更新后程序会关服务并用新版本重启：停止常规轮询，探测服务恢复后自动刷新页面。
+function waitRestart(){
+  exited = true;
+  clearTimeout(pollTimer); clearInterval(smsTimer);
+  let tries = 0;
+  const probe = async () => {
+    if(tries++ > 90) return;
+    try{
+      const res = await fetch("/api/status", {headers:{"X-Checkin":"1"}});
+      if(res.ok){ location.reload(); return; }
+    }catch(_){}
+    setTimeout(probe, 1000);
+  };
+  setTimeout(probe, 1500);
+}
+async function applyUpdate(){
+  if(updateBusy || exited) return;
+  if(!confirm("将下载最新版本、替换当前程序并自动重启（会短暂中断签到服务），继续？")) return;
+  updateBusy = true;
+  const btn = $("#btn-update-apply");
+  btn.disabled = true; btn.textContent = "更新中…";
+  try{
+    const res = await api("POST", "/api/update", {apply:true});
+    if(res.ok){
+      toast(res.message || "更新完成，程序正在重启…");
+      waitRestart();
+      if(res.message && /手动重启/.test(res.message)){ btn.disabled = false; btn.textContent = "一键更新"; updateBusy = false; }
+    }else{
+      toast(res.error || res.message || "更新失败");
+      btn.disabled = false; btn.textContent = "一键更新";
+    }
+  }catch(err){ toast("更新失败：" + err.message); btn.disabled = false; btn.textContent = "一键更新"; }
+  finally{ if(!exited) updateBusy = false; }
+}
+$("#btn-update-check").addEventListener("click", () => loadUpdate(true));
+$("#btn-update-apply").addEventListener("click", applyUpdate);
 /* ------------------------------------------------------------------ 主题切换（两态：点击立即切换明暗；未手动选择时跟随系统） */
 const THEME_KEY = "checkin-theme";
 const THEME_ICON = {
@@ -1117,6 +1290,7 @@ if("IntersectionObserver" in window && navLinks.length){
 }
 
 refresh(false).then(loadLog);
+loadUpdate(false);
 </script>
 </body>
 </html>

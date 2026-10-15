@@ -10,6 +10,7 @@ import (
 	"checkin/internal/scheduler"
 	"checkin/internal/state"
 	"checkin/internal/trae"
+	"checkin/internal/update"
 	"checkin/internal/util"
 	"checkin/internal/version"
 	"checkin/internal/wb"
@@ -65,6 +66,7 @@ func help() {
   logout    trae / workbuddy --uid <账号 UID>（清除本地凭据）
   config    show / get <点路径> / set <点路径> <值> / path
   schedule  enable / disable / status（定时随 ui 进程启停）
+  update    检查并安装新版本（--check 只检查）
   ui        本地 Web 看板（--port 8765 / --no-open）
   --version 查看版本
 
@@ -113,6 +115,8 @@ func Main(ctx context.Context, args []string) int {
 		return configCommand(args[1:])
 	case "schedule":
 		return schedule(ctx, args[1:])
+	case "update":
+		return updateCommand(ctx, args[1:])
 	case "ui":
 		f := flag.NewFlagSet("ui", flag.ContinueOnError)
 		port := f.Int("port", web.DefaultPort, "监听端口（默认 8765，被占用时自动顺延）")
@@ -335,6 +339,38 @@ func schedule(ctx context.Context, args []string) int {
 	if !ok {
 		return 1
 	}
+	return 0
+}
+func updateCommand(ctx context.Context, args []string) int {
+	f := flag.NewFlagSet("update", flag.ContinueOnError)
+	checkOnly := f.Bool("check", false, "只检查更新，不下载安装")
+	if code := parse(f, args); code >= 0 {
+		return code
+	}
+	info, err := update.Check(ctx, version.Version)
+	if err != nil {
+		fmt.Println("检查更新失败：" + err.Error())
+		return 1
+	}
+	fmt.Printf("当前版本 %s，最新版本 %s\n", info.Current, info.Latest)
+	if !info.HasUpdate {
+		fmt.Println(info.Message)
+		return 0
+	}
+	if info.Notes != "" {
+		fmt.Println("更新说明：\n" + info.Notes)
+	}
+	if *checkOnly {
+		fmt.Println("发现新版本，运行 checkin update 可下载安装。")
+		return 0
+	}
+	target, err := update.Apply(ctx, info)
+	if err != nil {
+		fmt.Println("更新失败：" + err.Error())
+		return 1
+	}
+	fmt.Printf("已更新到 %s（%s）\n", info.Latest, target)
+	fmt.Println("请重启程序以生效：重新运行 checkin，或在 WebUI 点「退出程序」后重新启动。")
 	return 0
 }
 func login(ctx context.Context, args []string) int {

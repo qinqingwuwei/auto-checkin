@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/url"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -73,9 +74,17 @@ func SendDingtalk(ctx context.Context, title, text, webhook, secret string) (boo
 	return false, fmt.Sprintf("钉钉发送失败：errcode=%v errmsg=%s", data["errcode"], util.String(data["errmsg"]))
 }
 func SendLocal(ctx context.Context, title, text string) (bool, string) {
-	if runtime.GOOS != "darwin" {
+	switch runtime.GOOS {
+	case "darwin":
+		return sendDarwin(ctx, title, text)
+	case "windows":
+		return sendWindows(ctx, title, text)
+	default:
 		return false, "当前平台暂不支持本地系统通知（仅日志 + 钉钉）"
 	}
+}
+
+func sendDarwin(ctx context.Context, title, text string) (bool, string) {
 	escape := func(s string, max int) string {
 		r := []rune(s)
 		if len(r) > max {
@@ -92,6 +101,51 @@ func SendLocal(ctx context.Context, title, text string) (bool, string) {
 		return false, "osascript 调用失败"
 	}
 	return true, "ok"
+}
+
+// sendWindows 通过 Windows PowerShell 5.1 的 WinRT Toast 发送系统通知（Win10/11 自带，无需额外模块）。
+// 标题与正文通过环境变量传入，避免中文与引号在脚本里被转义破坏；
+// 以 PowerShell 自身的 AUMID 作为通知来源，未注册自定义 AUMID 的机器也能正常弹出。
+func sendWindows(ctx context.Context, title, text string) (bool, string) {
+	script := strings.Join([]string{
+		`$ErrorActionPreference = "Stop"`,
+		`[void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime]`,
+		`$template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)`,
+		`$nodes = $template.GetElementsByTagName("text")`,
+		`[void]$nodes.Item(0).AppendChild($template.CreateTextNode($env:CHECKIN_NOTIFY_TITLE))`,
+		`[void]$nodes.Item(1).AppendChild($template.CreateTextNode($env:CHECKIN_NOTIFY_TEXT))`,
+		`$toast = [Windows.UI.Notifications.ToastNotification]::new($template)`,
+		`$appId = "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe"`,
+		`[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast)`,
+	}, "\n")
+	wait, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(wait, "powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", encodeUTF16(script))
+	cmd.Env = append(os.Environ(), "CHECKIN_NOTIFY_TITLE="+clip(title, 120), "CHECKIN_NOTIFY_TEXT="+clip(text, 400))
+	if err := cmd.Run(); err != nil {
+		return false, "Windows 系统通知调用失败（powershell 不可用或系统版本过低）"
+	}
+	return true, "ok"
+}
+
+func clip(s string, max int) string {
+	r := []rune(s)
+	if len(r) > max {
+		return string(r[:max])
+	}
+	return s
+}
+
+// encodeUTF16 生成 -EncodedCommand 需要的 base64（UTF-16LE），保证非 ASCII 文案不乱码。
+func encodeUTF16(script string) string {
+	utf16 := make([]byte, 0, len(script)*2)
+	for _, r := range script {
+		if r > 0xFFFF {
+			r = '?'
+		}
+		utf16 = append(utf16, byte(r), byte(r>>8))
+	}
+	return base64.StdEncoding.EncodeToString(utf16)
 }
 
 // Dispatch is called only by an explicitly invoked checkin run or scheduled run.

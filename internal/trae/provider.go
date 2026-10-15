@@ -16,8 +16,9 @@ const EntsPath = "/trae/api/v2/pay/user_current_entitlement_list"
 const ExpiredPath = "/trae/api/v2/pay/expired_ents"
 const BillingPath = "/trae/api/v2/pay/cn_credits_billing_status"
 
-// 签到/权益请求体对齐 IDE 的 Dqe()；device_id 由 post() 在请求时按账号注入。
-var checkinBody = util.M{"trae_client": "IDE", "req_source": 1, "client_version": "3.4.2"}
+// 签到/权益请求体对齐 IDE 的 eb()：签到链路（status/claim）只发 req_source，
+// 设备标识由 x-device-id 头携带（main.js 的 fb()），不要塞进请求体。
+var checkinBody = util.M{"req_source": 1}
 
 const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
 
@@ -38,17 +39,6 @@ func (p *Provider) post(ctx context.Context, path string, body util.M, label str
 		}
 	}
 	device := DeviceID(accountOf(token))
-	if body != nil {
-		// 签到请求体（checkinBody 带 req_source）对齐 IDE 的 Dqe()：同时携带 device_id。
-		if _, ok := body["req_source"]; ok {
-			clone := util.M{}
-			for k, v := range body {
-				clone[k] = v
-			}
-			clone["device_id"] = device
-			body = clone
-		}
-	}
 	headers := map[string]string{"Content-Type": "application/json", "Accept": "application/json, text/plain, */*", "Origin": "https://www.trae.cn", "Referer": "https://www.trae.cn/", "X-User-Region": "cn", "trae_client": "IDE", "x-device-id": device, "User-Agent": UA, "Authorization": "Cloud-IDE-JWT " + token}
 	data, status, err := p.Client.Request(ctx, "POST", p.BaseURL+path, headers, body, label)
 	if status == 401 || status == 403 {
@@ -74,7 +64,11 @@ func checkCode(data util.M, label string) error {
 	case 12153:
 		return provider.Fail(provider.Auth, label+" 票失效（12153），请运行 `checkin login trae`")
 	case 9074:
-		return provider.Fail(provider.RateLimit, label+" 被限流（9074）：请稍后重试")
+		// 上游文案必须原样带出来，否则只剩一句「请稍后重试」无法判断是风控还是频控。
+		if msg == "" {
+			msg = "请稍后重试"
+		}
+		return provider.Fail(provider.RateLimit, label+" 被限流（9074）："+msg)
 	default:
 		return provider.Fail(provider.Other, fmt.Sprintf("%s 失败：code=%g msg=%s", label, code, msg))
 	}

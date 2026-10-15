@@ -4,6 +4,7 @@ import (
 	"checkin/internal/auth"
 	"checkin/internal/config"
 	"checkin/internal/paths"
+	"checkin/internal/state"
 	"checkin/internal/util"
 	"context"
 	"encoding/json"
@@ -132,6 +133,10 @@ func TestSMSValidationCooldownAndSecretRedaction(t *testing.T) {
 func TestQuitCancelsProcessScheduleAndAccountLogin(t *testing.T) {
 	t.Setenv("CHECKIN_HOME", t.TempDir())
 	paths.Ensure()
+	// 标记今日已执行，避免启动时的「错过时段补跑」抢占执行槽，干扰本用例。
+	if err := state.Save(util.M{"lastRunDate": util.Today()}); err != nil {
+		t.Fatal(err)
+	}
 	config.Set("schedule.enabled", true)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

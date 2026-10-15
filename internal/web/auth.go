@@ -176,6 +176,12 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request, payload util
 		writeJSON(w, 400, util.M{"error": err.Error()})
 		return
 	}
+	// Trae 签到与设备标识绑定，只允许一个账号：已有可用会话时拒绝再次登录，
+	// 避免在同一台机器上换号导致设备标识被重置。会话已过期时仍允许重新登录。
+	if action == "login" && opts.Product == "trae" && trae.Locked() {
+		writeJSON(w, 409, util.M{"error": "Trae 已是登录状态（签到与设备绑定，仅支持一个账号）：如需更换账号，请先点「登出」再登录。"})
+		return
+	}
 	status, msg := s.startAuth(action, opts, uid)
 	writeJSON(w, status, util.M{"started": status == 202, "message": msg, "auth": s.AuthSnapshot()})
 }

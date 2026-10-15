@@ -147,8 +147,23 @@ func CredentialStatus(ctx context.Context) util.M {
 			logx.Warn("Trae 用户信息保存失败：%s", err)
 		}
 	}
-	return util.M{"configured": util.Truth(cred["session"]), "source": util.Or(cred["source"], "-"), "sessionExpires": cred["sessionExpires"], "jwtExp": cred["jwtExp"], "loginAt": cred["loginAt"], "savedAt": cred["savedAt"], "username": info["username"], "phone": info["phone"], "avatar": info["avatar"]}
+	return util.M{"configured": util.Truth(cred["session"]), "expired": sessionExpired(cred), "source": util.Or(cred["source"], "-"), "sessionExpires": cred["sessionExpires"], "jwtExp": cred["jwtExp"], "loginAt": cred["loginAt"], "savedAt": cred["savedAt"], "username": info["username"], "phone": info["phone"], "avatar": info["avatar"]}
 }
+
+// sessionExpired 判断网页会话是否已过期：过期时间未知（0/缺失）时按未过期处理，
+// 避免把「有效期未知」误判成需要重新登录。
+func sessionExpired(cred util.M) bool {
+	expires, ok := util.Number(cred["sessionExpires"])
+	return ok && expires > 0 && expires <= util.Now()
+}
+
+// Locked 表示本机已存在可用（未过期）的 Trae 会话。签到与设备标识绑定，
+// 因此只允许一个账号：已登录时拒绝再次登录，先登出才能换号。
+func Locked() bool {
+	cred := Load()
+	return util.Truth(cred["session"]) && !sessionExpired(cred)
+}
+
 func Account() string {
 	id := accountOf(util.String(Load()["jwt"]))
 	if id == "" {

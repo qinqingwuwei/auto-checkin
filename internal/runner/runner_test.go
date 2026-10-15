@@ -81,16 +81,32 @@ func TestDryRunAndAlreadySignedNeverClaim(t *testing.T) {
 		t.Fatalf("Python history contract: %+v", last)
 	}
 }
-func TestIdempotencyRateRetryAndLedgerFailure(t *testing.T) {
+// 限流失败不再自动重试（避免连击上游风控），并应把当天标记为「已执行」，供定时器判断是否补跑。
+func TestRateLimitIsNotRetriedAndMarksDay(t *testing.T) {
 	p := &fakeProvider{claimRate: 1}
 	e := engine(t, p)
 	e.Dispatch = nil
 	r, err := e.Execute(context.Background(), Options{Only: []string{"trae"}})
-	if err != nil || !r.OK || p.claims != 2 {
-		t.Fatalf("rate retry %d %v", p.claims, err)
+	if err != nil || r.OK || p.claims != 1 {
+		t.Fatalf("限流不应自动重试：claims=%d ok=%v err=%v", p.claims, r.OK, err)
+	}
+	if !r.Items[0].Error || !strings.Contains(r.Items[0].Message, "被限流") || !strings.Contains(r.Items[0].Message, "立即签到") {
+		t.Fatalf("限流提示应指向卡片手动重试：%+v", r.Items[0])
+	}
+	if state.LastRunDate() != util.Today() {
+		t.Fatalf("失败当天也应标记已执行：%q", state.LastRunDate())
+	}
+}
+func TestIdempotencyAndLedgerFailure(t *testing.T) {
+	p := &fakeProvider{}
+	e := engine(t, p)
+	e.Dispatch = nil
+	r, err := e.Execute(context.Background(), Options{Only: []string{"trae"}})
+	if err != nil || !r.OK || p.claims != 1 {
+		t.Fatalf("first run %d %v", p.claims, err)
 	}
 	r, err = e.Execute(context.Background(), Options{Only: []string{"trae"}})
-	if err != nil || !r.Items[0].Skipped || p.statusCalls != 1 || p.claims != 2 {
+	if err != nil || !r.Items[0].Skipped || p.statusCalls != 1 || p.claims != 1 {
 		t.Fatalf("idempotency %+v %v", r, err)
 	}
 	p.checked = true

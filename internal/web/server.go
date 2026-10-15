@@ -8,6 +8,7 @@ import (
 	"checkin/internal/scheduler"
 	"checkin/internal/state"
 	"checkin/internal/trae"
+	"checkin/internal/update"
 	"checkin/internal/util"
 	"checkin/internal/version"
 	"checkin/internal/wb"
@@ -45,6 +46,10 @@ type Server struct {
 	authCancel            context.CancelFunc
 	smsRetry              map[string]time.Time
 	ctx                   context.Context
+	pointsQuery           bool
+	updateCache           *update.Info
+	updateAt              float64
+	Restart               func() error
 }
 
 func New(ctx context.Context) *Server {
@@ -57,7 +62,10 @@ func (s *Server) RunSnapshot() util.M {
 	defer s.mu.Unlock()
 	return util.M{"running": s.running, "dryRun": s.dryRun, "startedAt": s.startedAt, "finishedAt": s.finishedAt, "lines": append([]string{}, s.lines...), "report": s.report}
 }
-func (s *Server) start(dry, force bool) bool {
+func (s *Server) start(dry, force bool) bool { return s.startWith(dry, force, nil) }
+
+// startWith 执行签到；only 非空时只跑指定目标（trae / workbuddy / workbuddy:<uid>）。
+func (s *Server) startWith(dry, force bool, only []string) bool {
 	s.mu.Lock()
 	if s.ctx.Err() != nil || s.running || s.accountAction.Running {
 		s.mu.Unlock()
@@ -80,7 +88,7 @@ func (s *Server) start(dry, force bool) bool {
 			s.mu.Unlock()
 		})
 		defer unsubscribe()
-		report, err := s.Execute(s.ctx, runner.Options{DryRun: dry, Force: force})
+		report, err := s.Execute(s.ctx, runner.Options{DryRun: dry, Force: force, Only: only})
 		s.mu.Lock()
 		if err != nil {
 			s.report = util.M{"error": logx.Redact(err.Error()), "items": []any{}, "dryRun": dry}
@@ -120,6 +128,80 @@ func (s *Server) StatusPayload(ctx context.Context) (util.M, error) {
 	traeView["sessionExpiresText"] = util.Timestamp(traeView["sessionExpires"])
 	return util.M{"version": version.Version, "date": util.Today(), "now": util.Now(), "stateDir": paths.Root(), "state": stored, "products": productRows(stored, usernames), "credentials": util.M{"trae": traeView, "workbuddy": accounts}, "auth": s.AuthSnapshot(), "points": state.Latest(history), "history": history, "config": config.Masked(cfg), "configWarnings": warnings, "secretsSet": util.M{"notify.dingtalk.webhook": cfg.Notify.Dingtalk.Webhook != "", "notify.dingtalk.secret": cfg.Notify.Dingtalk.Secret != ""}, "dingtalk": util.M{"ready": ready, "reason": reason}, "schedule": s.scheduleStatus(ctx), "run": s.RunSnapshot()}, nil
 }
+// runTargets 解析「只跑指定目标」参数：trae / workbuddy / workbuddy:<uid>。
+func runTargets(raw any) ([]string, error) {
+	targets := []string{}
+	for _, value := range util.List(raw) {
+		name := strings.TrimSpace(util.String(value))
+		switch {
+		case name == "trae" || name == "workbuddy":
+		case strings.HasPrefix(name, "workbuddy:") && !strings.ContainsAny(strings.TrimPrefix(name, "workbuddy:"), `/\`):
+		default:
+			return nil, fmt.Errorf("only 只支持 trae / workbuddy / workbuddy:<uid>")
+		}
+		targets = append(targets, name)
+	}
+	return targets, nil
+}
+
+// livePoints 接口直读当前积分台账（只读、不落盘）：历史快照只在成功执行后追加，会滞后。
+// 与签到/账号操作互斥，避免并发打同一个接口。
+func (s *Server) livePoints(ctx context.Context) (util.M, int, error) {
+	s.mu.Lock()
+	if s.ctx.Err() != nil || s.running || s.accountAction.Running {
+		s.mu.Unlock()
+		return nil, 409, fmt.Errorf("签到或账号操作进行中，请稍后再刷新积分")
+	}
+	if s.pointsQuery {
+		s.mu.Unlock()
+		return nil, 409, fmt.Errorf("上一次积分查询还在进行中")
+	}
+	s.pointsQuery = true
+	s.mu.Unlock()
+	defer func() { s.mu.Lock(); s.pointsQuery = false; s.mu.Unlock() }()
+	rows, err := runner.Points(ctx)
+	if err != nil {
+		return nil, 500, err
+	}
+	return util.M{"updatedAt": util.Now(), "items": rows}, 200, nil
+}
+
+const updateCacheTTL = time.Hour
+
+// updateInfo 读取 GitHub 最新 Release；结果缓存 1 小时，force 时强制重新检查。
+func (s *Server) updateInfo(ctx context.Context, force bool) (update.Info, error) {
+	s.mu.Lock()
+	if !force && s.updateCache != nil && util.Now()-s.updateAt < updateCacheTTL.Seconds() {
+		cached := *s.updateCache
+		s.mu.Unlock()
+		return cached, nil
+	}
+	s.mu.Unlock()
+	info, err := update.Check(ctx, version.Version)
+	if err != nil {
+		return info, err
+	}
+	s.mu.Lock()
+	s.updateCache, s.updateAt = &info, info.CheckedAt
+	s.mu.Unlock()
+	return info, nil
+}
+
+func (s *Server) setRestart(fn func() error) {
+	s.mu.Lock()
+	s.Restart = fn
+	s.mu.Unlock()
+}
+
+// takeRestart 取出更新后的重启动作，只在服务关闭收尾时调用一次。
+func (s *Server) takeRestart() func() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fn := s.Restart
+	s.Restart = nil
+	return fn
+}
+
 func hostOK(host string) bool {
 	host = strings.ToLower(strings.TrimSpace(host))
 	if strings.HasPrefix(host, "[") {
@@ -184,6 +266,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 200, util.M{"lines": logx.Tail(lines), "path": paths.Log()})
 		case "/api/auth/status":
 			writeJSON(w, 200, s.AuthSnapshot())
+		case "/api/points":
+			payload, status, err := s.livePoints(r.Context())
+			if err != nil {
+				writeJSON(w, status, util.M{"error": err.Error()})
+			} else {
+				writeJSON(w, 200, payload)
+			}
+		case "/api/update":
+			info, err := s.updateInfo(r.Context(), r.URL.Query().Get("refresh") == "1")
+			if err != nil {
+				writeJSON(w, 502, util.M{"error": err.Error(), "info": info})
+			} else {
+				writeJSON(w, 200, util.M{"info": info})
+			}
 		default:
 			writeJSON(w, 404, util.M{"error": "未知路径"})
 		}
@@ -218,12 +314,44 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/api/auth/login", "/api/auth/sms", "/api/auth/logout", "/api/auth/cancel":
 		s.handleAuth(w, r, payload)
 	case "/api/run":
-		started := s.start(util.Truth(payload["dry_run"]), util.Truth(payload["force"]))
+		only, err := runTargets(payload["only"])
+		if err != nil {
+			writeJSON(w, 400, util.M{"error": err.Error()})
+			return
+		}
+		started := s.startWith(util.Truth(payload["dry_run"]), util.Truth(payload["force"]), only)
 		status := 200
 		if !started {
 			status = 409
 		}
 		writeJSON(w, status, util.M{"started": started, "run": s.RunSnapshot()})
+	case "/api/update":
+		info, err := s.updateInfo(r.Context(), true)
+		if err != nil {
+			writeJSON(w, 502, util.M{"ok": false, "error": err.Error(), "info": info})
+			return
+		}
+		if !info.HasUpdate {
+			writeJSON(w, 409, util.M{"ok": false, "message": info.Message, "info": info})
+			return
+		}
+		target, err := update.Apply(r.Context(), info)
+		if err != nil {
+			logx.Error("版本更新失败：%s", err)
+			writeJSON(w, 500, util.M{"ok": false, "error": logx.Redact(err.Error()), "info": info})
+			return
+		}
+		if s.Stop == nil {
+			writeJSON(w, 200, util.M{"ok": true, "message": "已更新到 " + info.Latest + "，请手动重启程序", "info": info})
+			return
+		}
+		s.setRestart(func() error { return update.Restart(target, update.RestartArgs(false)...) })
+		writeJSON(w, 200, util.M{"ok": true, "message": "已更新到 " + info.Latest + "，程序正在重启…", "info": info})
+		// 先让响应写完，再关服务（释放端口），最后在 Serve 收尾时用新版本重启进程。
+		go func() {
+			util.Sleep(context.Background(), 800*time.Millisecond)
+			s.Stop()
+		}()
 	case "/api/config":
 		key := util.String(payload["key"])
 		value, exists := payload["value"]
@@ -331,6 +459,12 @@ func Serve(ctx context.Context, port int, openBrowser bool) error {
 		// Serve returns as soon as Shutdown closes the listener. Wait for
 		// handlers to flush /api/quit before main exits the process.
 		<-shutdownDone
+		// 版本更新后在这里用新二进制重启：服务已关闭、端口已释放，随后进程退出。
+		if restart := app.takeRestart(); restart != nil {
+			if restartErr := restart(); restartErr != nil {
+				logx.Error("%s", restartErr)
+			}
+		}
 		fmt.Println("看板已停止")
 		return nil
 	}

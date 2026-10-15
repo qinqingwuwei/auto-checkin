@@ -54,14 +54,64 @@ type Engine struct {
 	WorkBuddy   func(context.Context, util.M) (provider.Provider, error)
 	Accounts    func() []util.M
 	TraeAccount func() string
-	RetryWait   time.Duration
 	Dispatch    func(context.Context, config.Config, notify.Notification)
 }
 
 func New() *Engine {
-	return &Engine{Trae: func(context.Context) (provider.Provider, error) { return trae.New(), nil }, WorkBuddy: func(ctx context.Context, c util.M) (provider.Provider, error) { return wb.New(ctx, c) }, Accounts: wb.LoadAll, TraeAccount: trae.Account, RetryWait: 30 * time.Second, Dispatch: notify.Dispatch}
+	return &Engine{Trae: func(context.Context) (provider.Provider, error) { return trae.New(), nil }, WorkBuddy: func(ctx context.Context, c util.M) (provider.Provider, error) { return wb.New(ctx, c) }, Accounts: wb.LoadAll, TraeAccount: trae.Account, Dispatch: notify.Dispatch}
 }
 func Execute(ctx context.Context, opts Options) (Report, error) { return New().Execute(ctx, opts) }
+
+// Points 实时查询各产品/各账号的积分台账：只读、不领取、不写 state/points，
+// 供 WebUI 刷新页面时拿到真实余额（历史快照只在成功执行后追加，会滞后）。
+func Points(ctx context.Context) ([]util.M, error) { return New().Points(ctx) }
+
+func (e *Engine) Points(ctx context.Context) ([]util.M, error) {
+	cfg, _, err := config.Load()
+	if err != nil {
+		return nil, err
+	}
+	rows := []util.M{}
+	query := func(key, product, account, label string, factory func() (provider.Provider, error)) {
+		row := util.M{"key": key, "product": product, "account": account, "label": label}
+		rows = append(rows, row)
+		p, err := factory()
+		if err != nil {
+			row["error"] = logx.Redact(err.Error())
+			return
+		}
+		defer p.Close()
+		snapshot, err := p.FetchPoints(ctx)
+		if err != nil {
+			row["error"] = logx.Redact(err.Error())
+			return
+		}
+		summary := expiring.Summarize(snapshot.Batches, util.Now(), cfg.ExpiryWarningDays)
+		row["balance"] = snapshot.Balance
+		row["total_limit"] = snapshot.TotalLimit
+		row["total_used"] = snapshot.TotalUsed
+		row["batch_count"] = summary.BatchCount
+		row["expiring_days"] = cfg.ExpiryWarningDays
+		row["expiring_amount"] = summary.ExpiringAmount
+		row["expiring_30d"] = summary.Expiring30d
+		row["earliest_expire"] = summary.Earliest
+	}
+	if cfg.Products.Trae.Enabled {
+		query("trae", "trae", "-", "Trae CN", func() (provider.Provider, error) { return e.Trae(ctx) })
+	}
+	if cfg.Products.WorkBuddy.Enabled {
+		for _, cred := range e.Accounts() {
+			c := cred
+			uid := util.String(util.Or(c["uid"], "unknown"))
+			name := wb.DisplayName(c)
+			if name == "" {
+				name = wb.ShortUID(uid)
+			}
+			query("workbuddy:"+uid, "workbuddy", uid, "WorkBuddy ("+name+")", func() (provider.Provider, error) { return e.WorkBuddy(ctx, c) })
+		}
+	}
+	return rows, nil
+}
 
 // AcquireRunLock also serializes account changes with scheduled executions.
 func AcquireRunLock() (func(), error) {
@@ -94,29 +144,34 @@ func (e *Engine) Execute(ctx context.Context, opts Options) (Report, error) {
 		suffix = "，--force"
 	}
 	logx.Info("===== 开始执行（%s%s）=====", report.Date, suffix)
-	wants := func(product string) bool {
+	// Only 同时支持产品名（trae / workbuddy）与单个账号键（trae / workbuddy:<uid>），
+	// 供 WebUI 卡片上的「立即签到」只跑某一个账号。
+	wants := func(product, key string) bool {
 		if len(opts.Only) == 0 {
 			return true
 		}
 		for _, name := range opts.Only {
-			if strings.EqualFold(name, product) {
+			if strings.EqualFold(name, product) || strings.EqualFold(name, key) {
 				return true
 			}
 		}
 		return false
 	}
-	if cfg.Products.Trae.Enabled && wants("trae") {
+	if cfg.Products.Trae.Enabled && wants("trae", "trae") {
 		item := Item{Key: "trae", Label: "Trae CN", Account: "-"}
 		item = e.run(ctx, item, stored, opts, days, func() (provider.Provider, error) { return e.Trae(ctx) })
 		report.Items = append(report.Items, item)
 	}
-	if cfg.Products.WorkBuddy.Enabled && wants("workbuddy") {
+	if cfg.Products.WorkBuddy.Enabled && wants("workbuddy", "workbuddy") {
 		accounts := e.Accounts()
 		if len(accounts) == 0 {
 			report.Items = append(report.Items, Item{Key: "workbuddy", Label: "WorkBuddy", Account: "-", AuthExpired: true, Error: true, Message: "未登录：运行 `checkin login workbuddy --method browser`（微信扫码）或 `--method sms --phone <手机号>`"})
 		}
 		for _, cred := range accounts {
 			uid := util.String(util.Or(cred["uid"], "unknown"))
+			if !wants("workbuddy", "workbuddy:"+uid) {
+				continue
+			}
 			name := wb.DisplayName(cred)
 			if name == "" {
 				name = wb.ShortUID(uid)
@@ -133,6 +188,9 @@ func (e *Engine) Execute(ctx context.Context, opts Options) (Report, error) {
 		}
 	}
 	if !opts.DryRun {
+		// 记录「当天已真实执行过」——成功或失败都算。定时器据此决定是否需要当日补跑：
+		// 只要当天执行过就绝不自动重跑，避免限流连击与账号风险。
+		stored["lastRunDate"] = report.Date
 		if err = state.Save(stored); err != nil {
 			return report, fmt.Errorf("状态保存失败：%w", err)
 		}
@@ -183,14 +241,9 @@ func (e *Engine) run(ctx context.Context, item Item, stored util.M, opts Options
 				item.Success = true
 				item.Message = "dry-run：今日未签到，正式执行时将调用 claim"
 			} else {
+				// 失败后一律不自动重跑（含限流 9074）：连续重试会加重上游风控与账号风险，
+				// 需要重试时由用户在 WebUI 卡片上点「立即签到」手动触发。
 				outcome, claimErr := p.Claim(ctx)
-				var problem *provider.Error
-				if errors.As(claimErr, &problem) && problem.Kind == provider.RateLimit {
-					logx.Warn("%s 被限流（%s），%d 秒后重试一次", item.Label, problem, int(e.RetryWait.Seconds()))
-					if claimErr = util.Sleep(ctx, e.RetryWait); claimErr == nil {
-						outcome, claimErr = p.Claim(ctx)
-					}
-				}
 				if claimErr != nil {
 					markError(&item, claimErr)
 				} else {
@@ -228,7 +281,7 @@ func markError(item *Item, err error) {
 	if errors.As(err, &p) {
 		item.AuthExpired = p.Kind == provider.Auth
 		if p.Kind == provider.RateLimit {
-			item.Message = "被限流：" + item.Message + "（可稍后手动重跑）"
+			item.Message = "被限流：" + item.Message + "（不再自动重试，可稍后在卡片上点「立即签到」手动重试）"
 		}
 	}
 	logx.Error("%s：%s", item.Label, item.Message)

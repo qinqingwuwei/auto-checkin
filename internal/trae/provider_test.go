@@ -13,6 +13,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -28,8 +31,9 @@ func TestTraeWireProtocolAndLedger(t *testing.T) {
 		json.NewDecoder(r.Body).Decode(&body)
 		switch r.URL.Path {
 		case StatusPath, ClaimPath:
-			if body["client_version"] != "3.4.2" || body["trae_client"] != "IDE" || body["req_source"] != float64(1) || body["device_id"] == "" || body["device_id"] == nil {
-				t.Errorf("bad checkin payload %v", body)
+			// 签到链路只发 req_source，设备标识走 x-device-id 头（对齐 IDE 的 eb()）。
+			if len(body) != 1 || body["req_source"] != float64(1) {
+				t.Errorf("checkin payload %v", body)
 			}
 			if r.URL.Path == StatusPath {
 				fmt.Fprint(w, `{"code":0,"did_checked_in":true,"credits":100,"extra_credits":100}`)
@@ -86,6 +90,29 @@ func TestTraeErrorClassification(t *testing.T) {
 		if !errors.As(err, &e) || e.Kind != tc.kind {
 			t.Fatalf("code %d: %v", tc.code, err)
 		}
+	}
+}
+
+// 限流文案必须带出上游原始 msg，否则无法区分风控/频控。
+func TestTraeRateLimitKeepsUpstreamMessage(t *testing.T) {
+	err := checkCode(util.M{"code": 9074, "message": "操作太频繁，请稍后再试"}, "Trae 签到")
+	if err == nil || !strings.Contains(err.Error(), "操作太频繁") {
+		t.Fatalf("upstream message dropped: %v", err)
+	}
+}
+
+// 客户端设备标识取自 ahanet 的 tt_net_config.config，读到才能对齐设备身份。
+func TestIdeDeviceIDParsing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tt_net_config.config")
+	if got := ideDeviceID(path); got != "" {
+		t.Fatalf("missing file should yield empty, got %q", got)
+	}
+	content := "device_id&#*832753379059209@$*tnc_abtest&#*17925215@$*tnc_etag&#*35ca55e3-01d38794@$*"
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := ideDeviceID(path); got != "832753379059209" {
+		t.Fatalf("device id %q", got)
 	}
 }
 func TestMintCacheAndLegacyCompatibility(t *testing.T) {

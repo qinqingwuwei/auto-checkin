@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"checkin/internal/config"
+	"checkin/internal/state"
 	"checkin/internal/util"
 	"context"
 	"encoding/xml"
@@ -76,8 +77,12 @@ func TestProcessScheduleTimingBusyRetryAndStop(t *testing.T) {
 	if calls != 2 {
 		t.Fatal("disabled schedule ran")
 	}
+	// 重新启用时仍是次日 08:04:59，尚未到 08:06 → 不补跑，也不立即执行。
 	config.Set("schedule.enabled", true)
 	s.tick(now.Add(24 * time.Hour))
+	if calls != 2 {
+		t.Fatalf("re-enable before slot should not run, got %d", calls)
+	}
 	cancel()
 	s.tick(now.Add(48 * time.Hour))
 	if calls != 2 || s.Status()["running"] != false {
@@ -85,7 +90,7 @@ func TestProcessScheduleTimingBusyRetryAndStop(t *testing.T) {
 	}
 }
 
-func TestNextRunUsesLocalCalendarAndNoStartupCatchup(t *testing.T) {
+func TestNextRunUsesLocalCalendar(t *testing.T) {
 	loc := time.FixedZone("CST", 8*3600)
 	now := time.Date(2026, 10, 13, 9, 0, 0, 0, loc)
 	if next := NextRun(now, "08:00"); next.Day() != 14 || next.Hour() != 8 || next.Location() != loc {
@@ -99,6 +104,63 @@ func TestNextRunUsesLocalCalendarAndNoStartupCatchup(t *testing.T) {
 	now = time.Date(2026, 10, 31, 9, 0, 0, 0, dst)
 	if next := NextRun(now, "08:00"); next.Hour() != 8 || next.Sub(now) != 24*time.Hour {
 		t.Fatalf("DST calendar drift: %s (%s)", next, next.Sub(now))
+	}
+}
+
+// 程序在设定时刻之后才启动、且当天没有任何执行记录 → 当天补跑一次。
+func TestDailyCatchUpWhenSlotMissed(t *testing.T) {
+	t.Setenv("CHECKIN_HOME", t.TempDir())
+	config.Set("schedule.enabled", true)
+	config.Set("schedule.time", "08:00")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	s := New(ctx, func() bool { calls++; return true })
+	loc := time.FixedZone("CST", 8*3600)
+	s.tick(time.Date(2026, 10, 13, 10, 0, 0, 0, loc))
+	if calls != 1 {
+		t.Fatalf("错过时段未补跑：%d", calls)
+	}
+	// 同一天不重复补跑。
+	s.tick(time.Date(2026, 10, 13, 10, 1, 0, 0, loc))
+	if calls != 1 {
+		t.Fatalf("同日重复补跑：%d", calls)
+	}
+	// 次日到点正常触发。
+	s.tick(time.Date(2026, 10, 14, 8, 0, 0, 0, loc))
+	if calls != 2 {
+		t.Fatalf("次日到点未触发：%d", calls)
+	}
+}
+
+// 当天已经真实执行过（无论成功或失败，含进程重启后）→ 绝不再自动重跑。
+func TestNoCatchUpWhenTodayAlreadyRan(t *testing.T) {
+	t.Setenv("CHECKIN_HOME", t.TempDir())
+	state.Save(util.M{"lastRunDate": "2026-10-13"})
+	config.Set("schedule.enabled", true)
+	config.Set("schedule.time", "08:00")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	s := New(ctx, func() bool { calls++; return true })
+	s.tick(time.Date(2026, 10, 13, 10, 0, 0, 0, time.FixedZone("CST", 8*3600)))
+	if calls != 0 {
+		t.Fatalf("当天已执行过不应补跑：%d", calls)
+	}
+}
+
+// 尚未到设定时刻不补跑，等到点再触发。
+func TestNoCatchUpBeforeSlot(t *testing.T) {
+	t.Setenv("CHECKIN_HOME", t.TempDir())
+	config.Set("schedule.enabled", true)
+	config.Set("schedule.time", "08:00")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	s := New(ctx, func() bool { calls++; return true })
+	s.tick(time.Date(2026, 10, 13, 7, 0, 0, 0, time.FixedZone("CST", 8*3600)))
+	if calls != 0 {
+		t.Fatalf("未到设定时刻不应执行：%d", calls)
 	}
 }
 

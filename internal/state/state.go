@@ -17,7 +17,13 @@ func Load() util.M {
 	return m
 }
 func Save(m util.M) error { return util.WriteJSON(paths.State(), m) }
-func History() []util.M   { return util.ReadJSONL(paths.Points()) }
+
+// LastRunDate 返回最近一次真实执行（非 dry-run）所在的自然日。
+// 定时器用它判断「当天是否已经执行过」：只要执行过（无论成功或失败）就不再自动重跑，
+// 避免连续触发上游限流与账号风险。
+func LastRunDate() string { return util.String(Load()["lastRunDate"]) }
+
+func History() []util.M { return util.ReadJSONL(paths.Points()) }
 func Latest(history []util.M) []util.M {
 	latest := map[string]util.M{}
 	order := []string{}
