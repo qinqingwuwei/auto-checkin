@@ -77,10 +77,11 @@ func TestDryRunAndAlreadySignedNeverClaim(t *testing.T) {
 	}
 	rows := state.History()
 	last := rows[len(rows)-1]
-	if last["account"] != "legacy-trae-id" || util.Float(last["credit_today"]) != 100 || last["total_limit"] != nil || util.Float(last["expiring_amount"]) != 425.5 {
+	if last["account"] != "legacy-trae-id" || util.Float(last["credit_today"]) != 100 || last["total_limit"] != nil || util.Float(last["expiring_3d"]) != 425.5 {
 		t.Fatalf("Python history contract: %+v", last)
 	}
 }
+
 // 限流失败不再自动重试（避免连击上游风控），并应把当天标记为「已执行」，供定时器判断是否补跑。
 func TestRateLimitIsNotRetriedAndMarksDay(t *testing.T) {
 	p := &fakeProvider{claimRate: 1}
@@ -120,21 +121,24 @@ func TestIdempotencyAndLedgerFailure(t *testing.T) {
 		t.Fatalf("finalize %+v", record)
 	}
 }
-func TestTraeCreditTodayFollowsLedgerCheckinBatch(t *testing.T) {
-	// status 报 100 与台账当天签到批次 150 不一致时，应以台账为准（不取 status 的 credits/extra_credits 之和）。
+func TestCreditTodaySumsAllGrantedBatches(t *testing.T) {
+	// 「今日实际入账」按批次创建时间统计当天全部来源（签到 150 + 月度赠送 500），
+	// 既不取 status 回显，也不只看签到批次。
 	today := strings.ReplaceAll(util.Today(), "-", "")
+	now := util.Now()
 	p := &fakeProvider{checked: true, batches: []provider.Batch{
-		{Remain: 100, Limit: util.Ptr(150), Name: "checkin_" + today + "_u1"},
-		{Remain: 400, Limit: util.Ptr(500), Name: "monthly_bonus_" + today + "_u1"},
+		{Remain: 100, Limit: util.Ptr(150), Created: util.Ptr(now), Name: "checkin_" + today + "_u1"},
+		{Remain: 400, Limit: util.Ptr(500), Created: util.Ptr(now), Name: "monthly_bonus_" + today + "_u1"},
+		{Remain: 50, Limit: util.Ptr(50), Created: util.Ptr(now - 86400), Name: "yesterday_bonus"},
 	}}
 	e := engine(t, p)
 	e.Dispatch = nil
 	r, err := e.Execute(context.Background(), Options{Only: []string{"trae"}})
-	if err != nil || r.Items[0].CreditToday == nil || *r.Items[0].CreditToday != 150 {
+	if err != nil || r.Items[0].CreditToday == nil || *r.Items[0].CreditToday != 650 {
 		t.Fatalf("ledger-derived creditToday %+v %v", r.Items[0], err)
 	}
 	record := util.Map(util.Map(state.Load()["products"])["trae"])
-	if util.Float(record["creditToday"]) != 150 {
+	if util.Float(record["creditToday"]) != 650 {
 		t.Fatalf("state creditToday %+v", record)
 	}
 }

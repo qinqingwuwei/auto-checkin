@@ -19,8 +19,7 @@ type Config struct {
 		Time    string `json:"time"`
 		Enabled bool   `json:"enabled"`
 	} `json:"schedule"`
-	ExpiryWarningDays int `json:"expiry_warning_days"`
-	Notify            struct {
+	Notify struct {
 		Dingtalk struct {
 			Enabled bool   `json:"enabled"`
 			Webhook string `json:"webhook"`
@@ -43,13 +42,12 @@ type Config struct {
 
 var mu sync.Mutex
 var timePattern = regexp.MustCompile(`^(\d{1,2}):(\d{1,2})$`)
-var Keys = []string{"schedule.time", "schedule.enabled", "expiry_warning_days", "notify.dingtalk.enabled", "notify.dingtalk.webhook", "notify.dingtalk.secret", "notify.local.enabled", "notify.daily_summary", "products.trae.enabled", "products.workbuddy.enabled"}
+var Keys = []string{"schedule.time", "schedule.enabled", "notify.dingtalk.enabled", "notify.dingtalk.webhook", "notify.dingtalk.secret", "notify.local.enabled", "notify.daily_summary", "products.trae.enabled", "products.workbuddy.enabled"}
 
 func Defaults() Config {
 	var c Config
 	c.Schedule.Time = "08:00"
 	c.Schedule.Enabled = true
-	c.ExpiryWarningDays = 7
 	c.Notify.Dingtalk.Enabled = true
 	c.Notify.Local.Enabled = true
 	c.Products.Trae.Enabled = true
@@ -89,15 +87,6 @@ func Validate(key string, raw any) (any, error) {
 			}
 		}
 		return nil, fmt.Errorf("时间格式应为 HH:MM（24 小时制，如 08:00）")
-	case "expiry_warning_days":
-		n, err := strconv.Atoi(text)
-		if err != nil {
-			return nil, fmt.Errorf("应为整数天数（0-365，0 表示关闭预警）")
-		}
-		if n < 0 || n > 365 {
-			return nil, fmt.Errorf("天数应在 0-365 之间（0 表示关闭预警）")
-		}
-		return n, nil
 	case "notify.dingtalk.webhook":
 		if text != "" && !strings.HasPrefix(text, "http://") && !strings.HasPrefix(text, "https://") {
 			return nil, fmt.Errorf("webhook 应以 http:// 或 https:// 开头")

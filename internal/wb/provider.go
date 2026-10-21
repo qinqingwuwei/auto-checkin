@@ -17,10 +17,11 @@ const ClaimPath = "/v2/billing/meter/daily-checkin"
 const ResourcePath = "/v2/billing/meter/get-user-resource"
 
 type Provider struct {
-	Client *netutil.Client
-	Cred   util.M
-	Hosts  []string
-	host   string
+	Client  *netutil.Client
+	Cred    util.M
+	Hosts   []string
+	host    string
+	refresh string
 }
 
 func New(ctx context.Context, cred util.M) (*Provider, error) {
@@ -30,10 +31,18 @@ func New(ctx context.Context, cred util.M) (*Provider, error) {
 		c.Close()
 		return nil, err
 	}
-	return &Provider{Client: c, Cred: fresh, Hosts: append([]string{}, BillingHosts...), host: BillingHosts[0]}, nil
+	return &Provider{Client: c, Cred: fresh, Hosts: append([]string{}, BillingHosts...), host: BillingHosts[0], refresh: RefreshURL}, nil
 }
 func (p *Provider) Close() { p.Client.Close() }
-func (p *Provider) post(ctx context.Context, path string, body util.M, label string) (util.M, error) {
+
+func (p *Provider) refreshURL() string {
+	if p.refresh != "" {
+		return p.refresh
+	}
+	return RefreshURL
+}
+
+func (p *Provider) send(ctx context.Context, path string, body util.M, label string) (util.M, int, error) {
 	headers := map[string]string{"Authorization": "Bearer " + util.String(p.Cred["accessToken"]), "X-User-Id": util.String(util.Or(p.Cred["uid"], "-")), "User-Agent": "WorkBuddy/5.5.6", "Accept": "application/json, text/plain, */*", "Origin": "https://www.codebuddy.cn", "Referer": "https://www.codebuddy.cn/", "Content-Type": "application/json"}
 	hosts := []string{}
 	if p.host != "" {
@@ -48,23 +57,54 @@ func (p *Provider) post(ctx context.Context, path string, body util.M, label str
 	for _, host := range hosts {
 		data, status, err := p.Client.Request(ctx, "POST", host+path, headers, body, label)
 		if status == 401 || status == 403 {
-			return nil, provider.Fail(provider.Auth, fmt.Sprintf("%s 鉴权失败（HTTP %d）：请运行 `checkin login workbuddy` 重新登录", label, status))
+			return data, status, provider.Fail(provider.Auth, fmt.Sprintf("%s 鉴权失败（HTTP %d）：请运行 `checkin login workbuddy` 重新登录", label, status))
 		}
 		if err != nil {
 			last = err
 			continue
 		}
 		if status != 200 {
+			// 上游登录失效有时以 HTTP 400 + 「登录失效」业务文案返回，
+			// 这里保留响应体交给 post 判断是否需要自动续期。
+			if authFailure(data) {
+				p.host = host
+				return data, status, nil
+			}
 			last = provider.Fail(provider.Other, fmt.Sprintf("%s HTTP %d", label, status))
 			continue
 		}
 		p.host = host
-		return data, nil
+		return data, status, nil
 	}
 	if last == nil {
 		last = provider.Fail(provider.Other, label+" 全部 host 失败")
 	}
-	return nil, last
+	return nil, 0, last
+}
+
+func (p *Provider) post(ctx context.Context, path string, body util.M, label string) (util.M, error) {
+	data, status, err := p.send(ctx, path, body, label)
+	// access token 过期时上游可能返回 HTTP 401，也可能 200 + 「登录失效」业务码；
+	// 只要本地还有 refresh token，就自动续期并原样重试一次。
+	if util.Truth(p.Cred["refreshToken"]) && (status == 401 || status == 403 || authFailure(data)) {
+		if fresh, rerr := refreshWithClient(ctx, p.Client, p.refreshURL(), p.Cred); rerr == nil {
+			p.Cred = fresh
+			data, status, err = p.send(ctx, path, body, label)
+		}
+	}
+	if status == 401 || status == 403 {
+		return nil, provider.Fail(provider.Auth, fmt.Sprintf("%s 鉴权失败（HTTP %d）：请运行 `checkin login workbuddy` 重新登录", label, status))
+	}
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		if authFailure(data) {
+			return nil, provider.Fail(provider.Auth, fmt.Sprintf("%s 鉴权失败（HTTP %d）：请运行 `checkin login workbuddy` 重新登录", label, status))
+		}
+		return nil, provider.Fail(provider.Other, fmt.Sprintf("%s HTTP %d", label, status))
+	}
+	return data, nil
 }
 func containsAny(msg string, words ...string) bool {
 	msg = strings.ToLower(msg)
@@ -80,13 +120,22 @@ func checkFailure(data util.M, label string) error {
 		return nil
 	}
 	msg := util.String(util.Or(data["msg"], data["message"]))
-	if containsAny(msg, "未登录", "登录失效", "重新登录", "unauthorized") {
+	if authFailure(data) {
 		return provider.Fail(provider.Auth, label+" 失败："+msg+"（请重新登录：checkin login workbuddy）")
 	}
 	if containsAny(msg, "频繁", "限流", "too many", "rate limit") {
 		return provider.Fail(provider.RateLimit, label+" 被限流："+msg)
 	}
 	return provider.Fail(provider.Other, fmt.Sprintf("%s 失败：code=%v msg=%s", label, data["code"], msg))
+}
+
+// authFailure 识别「HTTP 200 但业务码提示登录失效」的响应，供自动续期重试使用。
+func authFailure(data util.M) bool {
+	if util.Float(data["code"]) == 0 {
+		return false
+	}
+	msg := util.String(util.Or(data["msg"], data["message"]))
+	return containsAny(msg, "未登录", "登录失效", "重新登录", "unauthorized")
 }
 func (p *Provider) Status(ctx context.Context) (provider.Status, error) {
 	data, err := p.post(ctx, StatusPath, util.M{}, "WorkBuddy 签到状态")
@@ -153,15 +202,10 @@ func (p *Provider) FetchPoints(ctx context.Context) (provider.Snapshot, error) {
 		if !ok {
 			continue
 		}
-		remain, _ := util.Number(util.Or(item["CapacityRemain"], item["Remain"], 0))
-		var expire *float64
-		for _, key := range []string{"DeductionEndTime", "ExpiredTime", "PackageEndTime", "CycleEndTime"} {
-			if n, ok := util.Number(item[key]); ok && n > 1e10 {
-				expire = util.Ptr(n / 1000)
-				break
-			}
-		}
-		batches = append(batches, provider.Batch{Remain: remain, Expire: expire, Limit: util.NumPtr(item["CapacitySize"]), Used: util.NumPtr(item["CapacityUsed"]), Name: util.String(util.Or(item["PackageName"], item["DealName"]))})
+		remain := util.Float(util.Or(item["CapacityRemain"], item["Remain"], 0))
+		expire := util.UnixTime(util.Or(item["DeductionEndTime"], item["ExpiredTime"], item["PackageEndTime"], item["CycleEndTime"]))
+		created := util.UnixTime(util.Or(item["CreateTime"], item["DeductionStartTime"]))
+		batches = append(batches, provider.Batch{Remain: remain, Expire: expire, Limit: util.FloatPtr(item["CapacitySize"]), Used: util.FloatPtr(item["CapacityUsed"]), Created: created, Name: util.String(util.Or(item["PackageName"], item["DealName"]))})
 	}
 	balance, ok := util.Number(util.Dig(node, "TotalDosage"))
 	if !ok {

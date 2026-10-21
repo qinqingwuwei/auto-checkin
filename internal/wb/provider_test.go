@@ -69,6 +69,89 @@ func TestWorkBuddyHostFallbackAndLedger(t *testing.T) {
 		t.Fatalf("sticky host %d %d", badCalls, goodCalls)
 	}
 }
+
+// 上游额度与时间字段可能是字符串、秒或毫秒，需统一解析并补齐 Created 供今日入账统计。
+func TestWorkBuddyLedgerParsesMixedTypes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"code":0,"data":{"Response":{"Data":{"Accounts":[{"CapacityRemain":"10","CapacitySize":"20","CapacityUsed":"10","DeductionEndTime":"1800000000","CreateTime":"2026-10-21 08:00:00","PackageName":"string-fields"},{"CapacityRemain":5.5,"DeductionEndTime":1800000000000,"CreateTime":1790000000000}]}}}}`)
+	}))
+	defer server.Close()
+	p := &Provider{Client: netutil.New(time.Second), Cred: util.M{"uid": "uid-1", "accessToken": "fixture"}, Hosts: []string{server.URL}, host: server.URL}
+	defer p.Close()
+	snapshot, err := p.FetchPoints(context.Background())
+	if err != nil || len(snapshot.Batches) != 2 || snapshot.Balance != 15.5 {
+		t.Fatalf("snapshot %+v %v", snapshot, err)
+	}
+	first := snapshot.Batches[0]
+	if first.Remain != 10 || first.Expire == nil || *first.Expire != 1800000000 || first.Created == nil || first.Limit == nil || *first.Limit != 20 || first.Used == nil || *first.Used != 10 {
+		t.Fatalf("first batch %+v", first)
+	}
+	if want := float64(time.Date(2026, 10, 21, 8, 0, 0, 0, time.Local).Unix()); *first.Created != want {
+		t.Fatalf("created %v want %v", *first.Created, want)
+	}
+	if second := snapshot.Batches[1]; second.Expire == nil || *second.Expire != 1800000000 || second.Created == nil || *second.Created != 1790000000 {
+		t.Fatalf("second batch %+v", second)
+	}
+}
+
+// access token 过期（HTTP 401）时应使用 refresh token 自动续期并重试一次。
+func TestWorkBuddyAutoRefreshesOn401(t *testing.T) {
+	t.Setenv("CHECKIN_HOME", t.TempDir())
+	paths.Ensure()
+	calls, refreshes := 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/refresh" {
+			refreshes++
+			if r.Header.Get("X-Refresh-Token") != "rt-1" {
+				t.Error("refresh token header")
+			}
+			json.NewEncoder(w).Encode(util.M{"code": 0, "data": util.M{"access_token": "fresh-token", "refresh_token": "rt-2"}})
+			return
+		}
+		calls++
+		if r.Header.Get("Authorization") != "Bearer fresh-token" {
+			w.WriteHeader(401)
+			return
+		}
+		fmt.Fprint(w, `{"code":0,"data":{"today_checked_in":true,"today_credit":100}}`)
+	}))
+	defer server.Close()
+	p := &Provider{Client: netutil.New(time.Second), Cred: util.M{"uid": "uid-1", "accessToken": "stale-token", "refreshToken": "rt-1"}, Hosts: []string{server.URL}, host: server.URL, refresh: server.URL + "/refresh"}
+	defer p.Close()
+	status, err := p.Status(context.Background())
+	if err != nil || !status.CheckedIn || calls != 2 || refreshes != 1 || p.Cred["accessToken"] != "fresh-token" || p.Cred["refreshToken"] != "rt-2" {
+		t.Fatalf("auto refresh status=%+v calls=%d refreshes=%d cred=%v err=%v", status, calls, refreshes, p.Cred, err)
+	}
+}
+
+// 上游也可能用 HTTP 400 + 「登录失效」文案表示 token 过期，同样应自动续期。
+func TestWorkBuddyRefreshesOnLoginExpiredBody(t *testing.T) {
+	t.Setenv("CHECKIN_HOME", t.TempDir())
+	paths.Ensure()
+	calls, refreshes := 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/refresh" {
+			refreshes++
+			json.NewEncoder(w).Encode(util.M{"code": 0, "data": util.M{"access_token": "fresh-token"}})
+			return
+		}
+		calls++
+		if r.Header.Get("Authorization") != "Bearer fresh-token" {
+			w.WriteHeader(400)
+			fmt.Fprint(w, `{"code":400,"msg":"登录失效"}`)
+			return
+		}
+		fmt.Fprint(w, `{"code":0,"data":{"today_checked_in":true}}`)
+	}))
+	defer server.Close()
+	p := &Provider{Client: netutil.New(time.Second), Cred: util.M{"uid": "uid-1", "accessToken": "stale-token", "refreshToken": "rt-1"}, Hosts: []string{server.URL}, host: server.URL, refresh: server.URL + "/refresh"}
+	defer p.Close()
+	status, err := p.Status(context.Background())
+	if err != nil || !status.CheckedIn || calls != 2 || refreshes != 1 {
+		t.Fatalf("auto refresh on 400 calls=%d refreshes=%d status=%+v err=%v", calls, refreshes, status, err)
+	}
+}
+
 func TestWorkBuddyAuthDoesNotSwitchHost(t *testing.T) {
 	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; w.WriteHeader(401) }))

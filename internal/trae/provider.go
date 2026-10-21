@@ -29,18 +29,36 @@ type Provider struct {
 
 func New() *Provider       { return &Provider{Client: netutil.New(30 * time.Second), BaseURL: Base} }
 func (p *Provider) Close() { p.Client.Close() }
-func (p *Provider) post(ctx context.Context, path string, body util.M, label string) (util.M, error) {
-	token := p.JWT
-	var err error
-	if token == "" {
-		token, err = tokenWithClient(ctx, p.Client, p.BaseURL, false)
-		if err != nil {
-			return nil, err
-		}
-	}
+
+// send 用指定 token 发一次请求；401/403 或 code=12153 视为票据失效。
+func (p *Provider) send(ctx context.Context, token, path string, body util.M, label string) (util.M, int, error) {
 	device := DeviceID(accountOf(token))
 	headers := map[string]string{"Content-Type": "application/json", "Accept": "application/json, text/plain, */*", "Origin": "https://www.trae.cn", "Referer": "https://www.trae.cn/", "X-User-Region": "cn", "trae_client": "IDE", "x-device-id": device, "User-Agent": UA, "Authorization": "Cloud-IDE-JWT " + token}
-	data, status, err := p.Client.Request(ctx, "POST", p.BaseURL+path, headers, body, label)
+	return p.Client.Request(ctx, "POST", p.BaseURL+path, headers, body, label)
+}
+
+func (p *Provider) post(ctx context.Context, path string, body util.M, label string) (util.M, error) {
+	var data util.M
+	var status int
+	var err error
+	for attempt := 0; attempt < 2; attempt++ {
+		token := p.JWT
+		if token == "" {
+			// 首次或上一次票据失效后强制换发，避免继续用同一张过期票重试。
+			token, err = tokenWithClient(ctx, p.Client, p.BaseURL, attempt > 0)
+			if err != nil {
+				return nil, err
+			}
+			p.JWT = token
+		}
+		data, status, err = p.send(ctx, token, path, body, label)
+		invalid := status == 401 || status == 403 || util.Float(data["code"]) == 12153
+		if invalid && attempt == 0 {
+			p.JWT = ""
+			continue
+		}
+		break
+	}
 	if status == 401 || status == 403 {
 		return nil, provider.Fail(provider.Auth, fmt.Sprintf("%s 鉴权失败（HTTP %d）：请运行 `checkin login trae`", label, status))
 	}
@@ -127,17 +145,12 @@ func (p *Provider) FetchPoints(ctx context.Context) (provider.Snapshot, error) {
 			continue
 		}
 		base := util.Map(pack["entitlement_base_info"])
-		expire := util.NumPtr(pack["expire_time"])
-		if expire == nil {
-			expire = util.NumPtr(base["end_time"])
-		}
-		if expire != nil && *expire == 0 {
-			expire = nil
-		}
+		expire := util.UnixTime(util.Or(pack["expire_time"], base["end_time"]))
+		created := util.UnixTime(util.Or(base["start_time"], pack["start_time"]))
 		quota := util.Map(util.Or(pack["quota"], base["quota"]))
 		limit := util.Float(quota["credits_limit"])
 		used := util.Float(util.Map(pack["usage"])["credits_amount"])
-		batches = append(batches, provider.Batch{Remain: util.Round(limit-used, 4), Expire: expire, Limit: util.Ptr(limit), Used: util.Ptr(used), Name: util.String(util.Or(pack["entitlement_id"], base["entitlement_id"]))})
+		batches = append(batches, provider.Batch{Remain: util.Round(limit-used, 4), Expire: expire, Limit: util.Ptr(limit), Used: util.Ptr(used), Created: created, Name: util.String(util.Or(pack["entitlement_id"], base["entitlement_id"]))})
 	}
 	summary := util.Map(data["usage_summary"])
 	total := util.NumPtr(summary["total_amount"])

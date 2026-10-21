@@ -195,6 +195,57 @@ func MaskWebhook(value any) string {
 }
 func Today() string { return time.Now().Format("2006-01-02") }
 func Now() float64  { return float64(time.Now().UnixNano()) / 1e9 }
+
+// UnixTime 把秒/毫秒时间戳或常见日期字符串统一成秒级 epoch，无法解析时返回 nil。
+// 上游不同接口的到期时间可能是秒、毫秒或 "YYYY-MM-DD HH:mm:ss" 字符串，统一在这里收口。
+func UnixTime(v any) *float64 {
+	if n, ok := Number(v); ok {
+		if n <= 0 {
+			return nil
+		}
+		if n > 1e11 {
+			n /= 1000
+		}
+		return &n
+	}
+	s := strings.TrimSpace(String(v))
+	if s == "" {
+		return nil
+	}
+	// 数值型字符串（如 "1800000000"）按时间戳处理，部分接口用字符串下发毫秒时间。
+	if n, err := strconv.ParseFloat(s, 64); err == nil {
+		if n <= 0 {
+			return nil
+		}
+		if n > 1e11 {
+			n /= 1000
+		}
+		return &n
+	}
+	for _, layout := range []string{"2006-01-02 15:04:05", time.RFC3339, "2006-01-02 15:04", "2006-01-02"} {
+		if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
+			n := float64(t.Unix())
+			return &n
+		}
+	}
+	return nil
+}
+
+// FloatPtr 解析数值字段；空值返回 nil，字符串数字也能解析（部分接口用字符串下发额度）。
+func FloatPtr(v any) *float64 {
+	if v == nil || v == "" {
+		return nil
+	}
+	if n, ok := Number(v); ok {
+		return &n
+	}
+	n, err := strconv.ParseFloat(strings.TrimSpace(String(v)), 64)
+	if err != nil {
+		return nil
+	}
+	return &n
+}
+
 func Timestamp(v any) string {
 	n := Float(v)
 	if n == 0 {
@@ -219,6 +270,7 @@ func Remain(v any) string {
 	}
 	return fmt.Sprintf("%.1f 天后过期", delta/86400)
 }
+
 // UUID4 生成随机 UUID v4 字符串，用于设备标识首次生成。
 func UUID4() string {
 	var b [16]byte

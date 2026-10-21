@@ -32,6 +32,7 @@ type Outcome struct {
 type Batch struct {
 	Remain              float64
 	Expire, Limit, Used *float64
+	Created             *float64
 	Name                string
 }
 type Snapshot struct {

@@ -20,20 +20,20 @@ func isolated(t *testing.T) {
 func TestValidationAndDefaults(t *testing.T) {
 	isolated(t)
 	cfg, warnings, err := Load()
-	if err != nil || len(warnings) > 0 || cfg.Schedule.Time != "08:00" || cfg.ExpiryWarningDays != 7 {
+	if err != nil || len(warnings) > 0 || cfg.Schedule.Time != "08:00" || cfg.Schedule.Enabled != true {
 		t.Fatalf("defaults: %+v %v %v", cfg, warnings, err)
 	}
-	for _, pair := range [][2]string{{"schedule.time", "8:5"}, {"expiry_warning_days", "0"}, {"notify.local.enabled", "关"}} {
+	for _, pair := range [][2]string{{"schedule.time", "8:5"}, {"notify.local.enabled", "关"}} {
 		if ok, msg := Set(pair[0], pair[1]); !ok {
 			t.Fatal(msg)
 		}
 	}
 	cfg, _, _ = Load()
-	if cfg.Schedule.Time != "08:05" || cfg.ExpiryWarningDays != 0 || cfg.Notify.Local.Enabled {
+	if cfg.Schedule.Time != "08:05" || cfg.Notify.Local.Enabled {
 		t.Fatalf("normalized config: %+v", cfg)
 	}
 	before, _ := os.ReadFile(paths.Config())
-	for _, pair := range [][2]string{{"schedule.time", "25:00"}, {"expiry_warning_days", "-1"}, {"expiry_warning_days", "365.5"}, {"notify.local.enabled", "maybe"}, {"notify.dingtalk.webhook", "ftp://invalid"}, {"notify.dingtalk.secret", "short"}, {"nope", "1"}} {
+	for _, pair := range [][2]string{{"schedule.time", "25:00"}, {"notify.local.enabled", "maybe"}, {"notify.dingtalk.webhook", "ftp://invalid"}, {"notify.dingtalk.secret", "short"}, {"nope", "1"}} {
 		if ok, _ := Set(pair[0], pair[1]); ok {
 			t.Fatalf("accepted invalid: %v", pair)
 		}
@@ -45,9 +45,9 @@ func TestValidationAndDefaults(t *testing.T) {
 }
 func TestDirtyDiskAndSecrets(t *testing.T) {
 	isolated(t)
-	os.WriteFile(paths.Config(), []byte(`{"schedule":{"time":"99:99"},"expiry_warning_days":999}`), 0600)
+	os.WriteFile(paths.Config(), []byte(`{"schedule":{"time":"99:99"},"notify":{"daily_summary":"maybe"}}`), 0600)
 	cfg, warnings, err := Load()
-	if err != nil || len(warnings) != 2 || cfg.Schedule.Time != "08:00" || cfg.ExpiryWarningDays != 7 {
+	if err != nil || len(warnings) != 2 || cfg.Schedule.Time != "08:00" || cfg.Notify.DailySummary {
 		t.Fatalf("fallback %+v %v %v", cfg, warnings, err)
 	}
 	os.WriteFile(paths.Config(), []byte(`{broken`), 0600)

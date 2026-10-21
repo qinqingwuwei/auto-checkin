@@ -69,17 +69,17 @@ func TestLocalAPIAndSecretBoundary(t *testing.T) {
 	if code, _ = request("GET", "/api/status", "", "evil.example", false); code != 403 {
 		t.Fatal("bad Host allowed")
 	}
-	if code, _ = request("POST", "/api/config", `{"key":"expiry_warning_days","value":14}`, "", false); code != 403 {
+	if code, _ = request("POST", "/api/config", `{"key":"notify.daily_summary","value":true}`, "", false); code != 403 {
 		t.Fatal("missing CSRF header allowed")
 	}
-	if code, _ = request("POST", "/api/config", `{"key":"expiry_warning_days","value":14}`, "", true); code != 200 {
+	if code, _ = request("POST", "/api/config", `{"key":"notify.daily_summary","value":true}`, "", true); code != 200 {
 		t.Fatal(code)
 	}
-	if code, _ = request("POST", "/api/config", `{"key":"expiry_warning_days","value":"abc"}`, "", true); code != 400 {
+	if code, _ = request("POST", "/api/config", `{"key":"notify.daily_summary","value":"abc"}`, "", true); code != 400 {
 		t.Fatal(code)
 	}
 	cfg, _, _ := config.Load()
-	if cfg.ExpiryWarningDays != 14 {
+	if !cfg.Notify.DailySummary {
 		t.Fatal("bad value persisted")
 	}
 	if code, _ = request("POST", "/api/config", strings.Repeat("x", 65537), "", true); code != 400 {

@@ -610,13 +610,13 @@ function credFor(credentials, product, account){
   return (credentials.workbuddy || []).find(c => String(c.uid) === String(account)) || null;
 }
 function statusPill(row, today){
+  // 成功状态不再展示「ok / 今日已签到」等文案，只保留异常与尚未执行两种提示。
   if(row.status === "error") return ['err', '异常'];
-  if(row.successDate === today) return ['ok', '今日已签到'];
-  if(row.status === "skip") return ['warn', '已跳过'];
-  return ['warn', '今日未执行'];
+  if(row.successDate === today || row.status === "ok" || row.status === "skip") return null;
+  return ['warn', '未执行'];
 }
 /* 实时积分：/api/points 接口直读，节流刷新（历史快照只在成功执行后追加，会滞后）。 */
-let livePoints = new Map(), pointsAt = 0, pointsBusy = false, signLabels = new Map(), lastStatus = null;
+let livePoints = new Map(), pointsAt = 0, pointsBusy = false, pointsQueued = false, signLabels = new Map(), lastStatus = null;
 const POINTS_TTL = 25;  // 秒
 function targetKey(product, account){
   // 与后端 runTargets / productRows 的 key 对齐：trae / workbuddy:<uid>
@@ -661,7 +661,7 @@ function renderCards(data){
   }
   wrap.innerHTML = models.map(({row, pts, cred, target}) => {
     const tone = row.product === "trae" ? "tone-trae" : "tone-workbuddy";
-    const [cls, text] = statusPill(row, data.date);
+    const pill = statusPill(row, data.date);
     const live = livePoints.get(target) || null;
     // 余额优先取实时接口；接口失败时回退到最近一次成功执行的快照。
     const src = (live && typeof live.balance === "number") ? live : pts;
@@ -671,10 +671,15 @@ function renderCards(data){
       : (src ? `<span class="live-tag"> · 快照</span>` : "");
     const signedToday = row.successDate === data.date;
     let delta = "", deltaErr = false;
-    if(signedToday && typeof row.creditToday === "number" && row.creditToday > 0)
-      delta = `今日 +${fmtNum(row.creditToday)}`;  // 只有当天真的成功入账才显示，9074 等失败当天不误报
+    // 今日入账优先用实时台账按批次创建时间统计的总额（含签到、赠送、任务、兑换）。
+    const todayCredit = (live && typeof live.credit_today === "number") ? live.credit_today
+      : (signedToday && typeof row.creditToday === "number" ? row.creditToday : null);
+    if(todayCredit > 0) delta = `今日 +${fmtNum(todayCredit)}`;
     if(live && live.error){ delta = `实时积分读取失败：${live.error}`; deltaErr = true; }
     const hot = v => (typeof v === "number" && v > 0) ? "hot" : "";
+    // 3 天 / 7 天固定窗口；旧快照只有 expiring_amount（当年动态阈值）时兼容回退。
+    const exp3 = src ? (src.expiring_3d != null ? src.expiring_3d : src.expiring_amount) : null;
+    const exp7 = src ? src.expiring_7d : null;
     const foot = [];
     if(row.at) foot.push(`最近 ${row.at}`);
     if(cred){
@@ -701,20 +706,19 @@ function renderCards(data){
             ${sub ? `<span class="sub">@${escapeHtml(String(sub))}</span>` : ""}
           </div>
         </div>
-        <span class="pill ${cls}"><i></i>${text}</span>
+        ${pill ? `<span class="pill ${pill[0]}"><i></i>${pill[1]}</span>` : ""}
       </div>
       <div class="balance"><span class="num">${bal}</span><span class="unit">积分余额${liveTag}</span></div>
       <div class="delta${deltaErr ? " err" : ""}">${escapeHtml(delta)}</div>
       <dl class="metrics">
-        <div><dt>${src && src.expiring_days != null ? src.expiring_days : 7} 天内到期</dt>
-             <dd class="${src ? hot(src.expiring_amount) : ""}">${src ? fmtNum(src.expiring_amount) : "—"}</dd></div>
-        <div><dt>30 天内到期</dt><dd>${src ? fmtNum(src.expiring_30d) : "—"}</dd></div>
+        <div><dt>3 天内到期</dt><dd class="${src ? hot(exp3) : ""}">${src ? fmtNum(exp3) : "—"}</dd></div>
+        <div><dt>7 天内到期</dt><dd class="${src ? hot(exp7) : ""}">${src ? fmtNum(exp7) : "—"}</dd></div>
         <div><dt>积分批次</dt><dd>${src && src.batch_count != null ? src.batch_count : "—"}</dd></div>
       </dl>
       ${action}
       <footer class="card-foot">
         ${foot.map(x => `<span>${escapeHtml(String(x))}</span>`).join("")}
-        ${row.message ? `<span class="msg">${escapeHtml(row.message)}</span>` : ""}
+        ${row.status === "error" && row.message ? `<span class="msg">${escapeHtml(row.message)}</span>` : ""}
       </footer>
     </article>`;
   }).join("");
@@ -735,14 +739,16 @@ async function signOne(target, btn){
     schedule(1200);
   }catch(err){ toast("签到失败：" + err.message); if(btn) btn.disabled = false; }
 }
-/* 拉取实时积分：与签到/账号操作互斥，节流 25 秒，成功后就地重绘卡片。 */
+/* 拉取实时积分：与签到/账号操作互斥，节流 25 秒，成功后就地重绘卡片。
+   force=true 时跳过节流；若已有查询在跑，则排队在结束后再强制查一次。 */
 async function loadPoints(force){
-  if(exited || pointsBusy) return;
-  if(!force && pointsAt && Date.now()/1000 - pointsAt < POINTS_TTL) return;
+  if(exited) return null;
+  if(pointsBusy){ if(force) pointsQueued = true; return null; }
+  if(!force && pointsAt && Date.now()/1000 - pointsAt < POINTS_TTL) return null;
   pointsBusy = true;
   try{
     const res = await api("GET", "/api/points");
-    if(exited) return;
+    if(exited) return res;
     if(res.items){
       const map = new Map();
       res.items.forEach(r => map.set(String(r.key), r));
@@ -750,8 +756,9 @@ async function loadPoints(force){
       pointsAt = typeof res.updatedAt === "number" ? res.updatedAt : Date.now()/1000;
       if(lastStatus) renderCards(lastStatus);
     }
-  }catch(_){ }
-  finally{ pointsBusy = false; }
+    return res;
+  }catch(_){ return null; }
+  finally{ pointsBusy = false; if(pointsQueued){ pointsQueued = false; loadPoints(true); } }
 }
 function escapeHtml(s){
   return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -926,7 +933,6 @@ function renderChart(history){
 /* ------------------------------------------------------------------ 配置 */
 const CFG_SPEC = [
   {key:"schedule.time", label:"每日执行时间", type:"time", hint:"使用本机时区，保存后立即生效"},
-  {key:"expiry_warning_days", label:"到期预警阈值", type:"number", hint:"单位天，0 = 关闭预警"},
   {key:"notify.dingtalk.enabled", label:"钉钉通知", type:"bool"},
   {key:"notify.dingtalk.webhook", label:"钉钉 Webhook", type:"secret", hint:"留空 = 不修改"},
   {key:"notify.dingtalk.secret", label:"钉钉加签 Secret", type:"secret", hint:"留空 = 不修改"},
@@ -1071,7 +1077,8 @@ function renderReport(report){
     const extras = [];
     if(it.creditToday) extras.push(`今日 +${fmtNum(it.creditToday)}`);
     if(typeof it.balance === "number") extras.push(`余额 ${fmtNum(it.balance)}`);
-    if(it.expiring) extras.push(`${it.expiringDays} 天内到期 ${fmtNum(it.expiring)}`);
+    if(it.expiring3d) extras.push(`3 天内到期 ${fmtNum(it.expiring3d)}`);
+    if(it.expiring7d) extras.push(`7 天内到期 ${fmtNum(it.expiring7d)}`);
     return `<div class="item ${cls}">
       <span class="tag">${tag}</span>
       <span class="body"><b>${escapeHtml(it.label)}</b>
@@ -1104,18 +1111,18 @@ function schedule(delay){
   if(exited) return;
   pollTimer = setTimeout(() => refresh(true), delay);
 }
-async function refresh(quiet){
-  if(exited) return;
+async function refresh(quiet, skipPoints){
+  if(exited) return null;
   try{
     if(authBusy){
       const auth = await api("GET", "/api/auth/status");
-      if(exited) return;
+      if(exited) return null;
       renderAccountAction(auth);
-      if(authBusy){ schedule(1200); return; }
+      if(authBusy){ schedule(1200); return null; }
     }
     const data = await api("GET", "/api/status");
-    if(exited) return;
-    if(data.error){ if(!quiet) toast(String(data.error)); return; }
+    if(exited) return null;
+    if(data.error){ if(!quiet) toast(String(data.error)); return null; }
     lastStatus = data;
     $("#today").textContent = data.date || "—";
     $("#state-dir").textContent = data.stateDir || "~/.checkin/";
@@ -1126,16 +1133,34 @@ async function refresh(quiet){
     renderRun(data.run);
     wasRunning = !!(data.run && data.run.running);
     // 卡片余额改为接口直读的实时值（历史快照只在成功执行后追加，消耗积分后不会自动更新）。
-    if(!wasRunning && !authBusy) loadPoints(false);
+    if(!wasRunning && !authBusy && !skipPoints) loadPoints(false);
     schedule(wasRunning || authBusy ? 1200 : 5000);
+    return data;
   }catch(err){
     if(!quiet) toast("无法连接本地服务：" + err.message);
     schedule(5000);
+    return null;
   }
 }
 
 /* ------------------------------------------------------------------ 绑定 */
-$("#btn-refresh").addEventListener("click", () => { refresh(false); loadLog(); toast("已刷新"); });
+// 刷新按钮：状态、实时积分、日志、更新信息一次性全部重新拉取，而不是只刷新状态。
+$("#btn-refresh").addEventListener("click", async () => {
+  const btn = $("#btn-refresh");
+  if(btn.disabled) return;
+  btn.disabled = true;
+  try{
+    pointsAt = 0;  // 取消实时积分的 25 秒节流，强制重新查询
+    const data = await refresh(false, true);
+    if(!data) return;
+    const pts = await loadPoints(true);
+    if(pts && !pts.items && pts.error) toast("实时积分刷新失败：" + pts.error);
+    else toast("已刷新全部数据");
+    await loadLog();
+  } finally {
+    setTimeout(() => { btn.disabled = false; }, 800);
+  }
+});
 $("#btn-run").addEventListener("click", startRun);
 // 执行模式三选一；选「干跑」时按钮文案明示，避免误以为会真实签到。
 function runMode(){

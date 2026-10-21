@@ -85,10 +85,9 @@ Go 单文件程序，内嵌本地 WebUI，支持账号登录、每日签到、�
 | --- | --- | --- |
 | `schedule.enabled` | `true` | 程序内定时开关 |
 | `schedule.time` | `08:00` | 每日时间，保存后即时生效 |
-| `expiry_warning_days` | `7` | 到期预警 0–365 天，0 关闭预警 |
 | `notify.dingtalk.enabled` | `true` | 钉钉开关 |
 | `notify.dingtalk.webhook` / `notify.dingtalk.secret` | 空 | webhook 与加签 secret |
-| `notify.local.enabled` | `true` | macOS 系统通知开关 |
+| `notify.local.enabled` | `true` | 系统通知开关（macOS / Windows） |
 | `notify.daily_summary` | `false` | 每日成功简报，默认仅异常或到期预警通知 |
 | `products.trae.enabled` / `products.workbuddy.enabled` | `true` | 产品签到开关 |
 
@@ -98,11 +97,11 @@ Go 单文件程序，内嵌本地 WebUI，支持账号登录、每日签到、�
 ./checkin ui
 ```
 
-未配置钉钉仍可签到，结果会写入日志。Windows / Linux 使用日志与钉钉，当前无本地系统通知。
+未配置钉钉仍可签到，结果会写入日志。macOS 使用系统通知中心，Windows 使用 PowerShell Toast（失败时回退托盘气泡）；Linux 使用日志与钉钉。
 
 Go 版直接读写原有 `~/.checkin/`：`config.json`、`state.json`、`points.jsonl`、`logs/`、`credentials/trae.json`、`credentials/workbuddy/<uid>.json`。支持 `trae-web-state.json`、`workbuddy-sms.json`、`workbuddy-oauth.json` 的首次导入。凭据与配置原子写入；macOS / Linux 使用 0600 文件与 0700 目录权限，Windows 使用仅允许当前用户和 SYSTEM 的原生 ACL；日志每 2 MiB 轮转，保留 5 份。凭据当前是本地文件保存，尚未集成系统密钥库。工具不写入产品客户端目录。
 
-Trae 会话经 POST `GetUserToken` 换 JWT，提前 10 分钟换票。WorkBuddy 的 AT 不足 6 小时自动续期，业务接口与 OAuth 接口使用各自 host。
+Trae 会话经 POST `GetUserToken` 换 JWT，提前 10 分钟换票；请求返回 401/403 或票据失效（12153）时自动重新换票并重试一次。WorkBuddy 的 AT 不足 6 小时自动续期，业务接口遇到 401/403 或登录失效时会用 refresh token 自动续期并重试一次，业务接口与 OAuth 接口使用各自 host。
 
 ## 开发与发布
 

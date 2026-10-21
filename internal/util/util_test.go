@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestJWTAndAtomicData(t *testing.T) {
@@ -33,6 +34,44 @@ func TestJWTAndAtomicData(t *testing.T) {
 	os.WriteFile(jsonl, []byte("bad\n{\"product\":\"trae\"}\n[]\n"), 0600)
 	if len(ReadJSONL(jsonl)) != 1 {
 		t.Fatal("invalid history rows not skipped")
+	}
+}
+
+func TestUnixTimeAndFloatPtr(t *testing.T) {
+	date := float64(time.Date(2026, 10, 21, 8, 0, 0, 0, time.Local).Unix())
+	rfc, _ := time.Parse(time.RFC3339, "2026-10-21T08:00:00+08:00")
+	cases := []struct {
+		in   any
+		want float64
+		nil  bool
+	}{
+		{1800000000.0, 1800000000, false},
+		{"1800000000", 1800000000, false},
+		{1800000000000.0, 1800000000, false},
+		{"1800000000000", 1800000000, false},
+		{"2026-10-21 08:00:00", date, false},
+		{"2026-10-21T08:00:00+08:00", float64(rfc.Unix()), false},
+		{0.0, 0, true},
+		{"", 0, true},
+		{"not-a-time", 0, true},
+	}
+	for _, c := range cases {
+		got := UnixTime(c.in)
+		if c.nil {
+			if got != nil {
+				t.Fatalf("UnixTime(%v) = %v, want nil", c.in, *got)
+			}
+			continue
+		}
+		if got == nil || *got != c.want {
+			t.Fatalf("UnixTime(%v) = %v, want %v", c.in, got, c.want)
+		}
+	}
+	if v := FloatPtr("12.5"); v == nil || *v != 12.5 {
+		t.Fatalf("FloatPtr string = %v", v)
+	}
+	if FloatPtr("") != nil || FloatPtr("abc") != nil {
+		t.Fatal("FloatPtr accepted invalid")
 	}
 }
 

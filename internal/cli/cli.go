@@ -240,7 +240,7 @@ func status(ctx context.Context, args []string) int {
 		if len(account) > 8 {
 			account = account[:8]
 		}
-		fmt.Printf("  %s %s/%s：余额 %v，%v 天内到期 %v，30 天内到期 %v\n", util.String(row["date"]), util.String(row["product"]), string(account), row["balance"], row["expiring_days"], row["expiring_amount"], row["expiring_30d"])
+		fmt.Printf("  %s %s/%s：余额 %v，3 天内到期 %v，7 天内到期 %v\n", util.String(row["date"]), util.String(row["product"]), string(account), row["balance"], row["expiring_3d"], row["expiring_7d"])
 	}
 	fmt.Println("\n日志：" + paths.Log())
 	return 0

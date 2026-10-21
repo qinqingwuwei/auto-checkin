@@ -20,22 +20,27 @@ import (
 )
 
 type Item struct {
-	Key          string   `json:"key"`
-	Label        string   `json:"label"`
-	Account      string   `json:"account"`
-	Success      bool     `json:"success"`
-	Already      bool     `json:"already"`
-	Skipped      bool     `json:"skipped"`
-	Error        bool     `json:"error"`
-	AuthExpired  bool     `json:"authExpired"`
-	Message      string   `json:"message"`
-	CreditToday  *float64 `json:"creditToday"`
-	Balance      *float64 `json:"balance"`
-	BatchCount   *int     `json:"batchCount"`
-	ExpiringDays *int     `json:"expiringDays"`
-	Expiring     *float64 `json:"expiring"`
-	Expiring30d  *float64 `json:"expiring30d"`
-	Points       util.M   `json:"-"`
+	Key             string   `json:"key"`
+	Label           string   `json:"label"`
+	Account         string   `json:"account"`
+	Success         bool     `json:"success"`
+	Already         bool     `json:"already"`
+	Skipped         bool     `json:"skipped"`
+	Error           bool     `json:"error"`
+	AuthExpired     bool     `json:"authExpired"`
+	Message         string   `json:"message"`
+	CreditToday     *float64 `json:"creditToday"`
+	Balance         *float64 `json:"balance"`
+	TotalLimit      *float64 `json:"totalLimit"`
+	TotalUsed       *float64 `json:"totalUsed"`
+	BatchCount      *int     `json:"batchCount"`
+	Expiring3d      *float64 `json:"expiring3d"`
+	Expiring7d      *float64 `json:"expiring7d"`
+	ExpiringCount3d *int     `json:"expiringCount3d"`
+	ExpiringCount7d *int     `json:"expiringCount7d"`
+	Earliest3d      *float64 `json:"earliest3d"`
+	Earliest7d      *float64 `json:"earliest7d"`
+	Points          util.M   `json:"-"`
 }
 type Report struct {
 	Date       string  `json:"date"`
@@ -86,15 +91,7 @@ func (e *Engine) Points(ctx context.Context) ([]util.M, error) {
 			row["error"] = logx.Redact(err.Error())
 			return
 		}
-		summary := expiring.Summarize(snapshot.Batches, util.Now(), cfg.ExpiryWarningDays)
-		row["balance"] = snapshot.Balance
-		row["total_limit"] = snapshot.TotalLimit
-		row["total_used"] = snapshot.TotalUsed
-		row["batch_count"] = summary.BatchCount
-		row["expiring_days"] = cfg.ExpiryWarningDays
-		row["expiring_amount"] = summary.ExpiringAmount
-		row["expiring_30d"] = summary.Expiring30d
-		row["earliest_expire"] = summary.Earliest
+		applyRow(row, snapshot, time.Now())
 	}
 	if cfg.Products.Trae.Enabled {
 		query("trae", "trae", "-", "Trae CN", func() (provider.Provider, error) { return e.Trae(ctx) })
@@ -111,6 +108,28 @@ func (e *Engine) Points(ctx context.Context) ([]util.M, error) {
 		}
 	}
 	return rows, nil
+}
+
+// applyRow 把一次实时台账查询的完整积分数据写入返回行：
+// 余额、总额度/已用、批次明细、今日实际入账、3 天 / 7 天到期金额与最近到期时间。
+func applyRow(row util.M, snapshot provider.Snapshot, now time.Time) {
+	summary := expiring.Summarize(snapshot.Batches, float64(now.UnixNano())/1e9)
+	row["balance"] = snapshot.Balance
+	row["total_limit"] = snapshot.TotalLimit
+	row["total_used"] = snapshot.TotalUsed
+	row["batch_count"] = summary.BatchCount
+	row["credit_today"] = expiring.GrantedOn(snapshot.Batches, now)
+	row["expiring_3d"] = summary.Expiring3d
+	row["expiring_count_3d"] = summary.ExpiringCount3d
+	row["earliest_3d"] = summary.Earliest3d
+	row["expiring_7d"] = summary.Expiring7d
+	row["expiring_count_7d"] = summary.ExpiringCount7d
+	row["earliest_7d"] = summary.Earliest7d
+	batches := make([]util.M, 0, len(snapshot.Batches))
+	for _, b := range snapshot.Batches {
+		batches = append(batches, util.M{"remain": b.Remain, "expire": b.Expire, "limit": b.Limit, "used": b.Used, "created": b.Created, "name": b.Name})
+	}
+	row["batches"] = batches
 }
 
 // AcquireRunLock also serializes account changes with scheduled executions.
@@ -136,7 +155,6 @@ func (e *Engine) Execute(ctx context.Context, opts Options) (Report, error) {
 		return report, err
 	}
 	stored := state.Load()
-	days := cfg.ExpiryWarningDays
 	suffix := ""
 	if opts.DryRun {
 		suffix = "，dry-run"
@@ -159,7 +177,7 @@ func (e *Engine) Execute(ctx context.Context, opts Options) (Report, error) {
 	}
 	if cfg.Products.Trae.Enabled && wants("trae", "trae") {
 		item := Item{Key: "trae", Label: "Trae CN", Account: "-"}
-		item = e.run(ctx, item, stored, opts, days, func() (provider.Provider, error) { return e.Trae(ctx) })
+		item = e.run(ctx, item, stored, opts, func() (provider.Provider, error) { return e.Trae(ctx) })
 		report.Items = append(report.Items, item)
 	}
 	if cfg.Products.WorkBuddy.Enabled && wants("workbuddy", "workbuddy") {
@@ -177,7 +195,7 @@ func (e *Engine) Execute(ctx context.Context, opts Options) (Report, error) {
 				name = wb.ShortUID(uid)
 			}
 			item := Item{Key: "workbuddy:" + uid, Label: "WorkBuddy (" + name + ")", Account: uid}
-			item = e.run(ctx, item, stored, opts, days, func() (provider.Provider, error) { return e.WorkBuddy(ctx, cred) })
+			item = e.run(ctx, item, stored, opts, func() (provider.Provider, error) { return e.WorkBuddy(ctx, cred) })
 			report.Items = append(report.Items, item)
 		}
 	}
@@ -195,7 +213,7 @@ func (e *Engine) Execute(ctx context.Context, opts Options) (Report, error) {
 			return report, fmt.Errorf("状态保存失败：%w", err)
 		}
 	}
-	note := ComposeNotification(report, cfg, days)
+	note := ComposeNotification(report, cfg)
 	if note != nil {
 		if opts.DryRun {
 			logx.Info("dry-run：以下通知不会真实发送\n%s", strings.Join(note.Lines, "\n"))
@@ -207,7 +225,7 @@ func (e *Engine) Execute(ctx context.Context, opts Options) (Report, error) {
 	}
 	return report, nil
 }
-func (e *Engine) run(ctx context.Context, item Item, stored util.M, opts Options, days int, factory func() (provider.Provider, error)) Item {
+func (e *Engine) run(ctx context.Context, item Item, stored util.M, opts Options, factory func() (provider.Provider, error)) Item {
 	record := util.Map(util.Map(stored["products"])[item.Key])
 	if !opts.Force && !opts.DryRun && record["successDate"] == util.Today() {
 		item.Success = true
@@ -258,7 +276,7 @@ func (e *Engine) run(ctx context.Context, item Item, stored util.M, opts Options
 			}
 			if !item.Error {
 				logx.Info("%s 签到：%s", item.Label, item.Message)
-				e.fetchPoints(ctx, &item, p, days, opts.DryRun)
+				e.fetchPoints(ctx, &item, p, opts.DryRun)
 			}
 		}
 	}
@@ -286,7 +304,7 @@ func markError(item *Item, err error) {
 	}
 	logx.Error("%s：%s", item.Label, item.Message)
 }
-func (e *Engine) fetchPoints(ctx context.Context, item *Item, p provider.Provider, days int, dry bool) {
+func (e *Engine) fetchPoints(ctx context.Context, item *Item, p provider.Provider, dry bool) {
 	snapshot, err := p.FetchPoints(ctx)
 	if err != nil {
 		item.Error = true
@@ -294,35 +312,28 @@ func (e *Engine) fetchPoints(ctx context.Context, item *Item, p provider.Provide
 		logx.Error("%s 积分台账获取失败：%s", item.Label, err)
 		return
 	}
-	summary := expiring.Summarize(snapshot.Batches, util.Now(), days)
-	// Trae 的「今日签到所得」以积分台账当天签到批次的额度为准（批次 id 形如 checkin_20261014_<uid>）：
-	// status 的 credits/extra_credits 只是回显，并不等于真实入账。
-	if item.Key == "trae" {
-		if amount := todayCheckinCredits(snapshot.Batches); amount != nil {
-			item.CreditToday = amount
-		}
+	summary := expiring.Summarize(snapshot.Batches, util.Now())
+	// 「今日实际入账」按批次创建时间统计当天所有来源（签到、赠送、任务、兑换），
+	// 不再只看签到批次，也不用 status 的回显值。
+	if granted := expiring.GrantedOn(snapshot.Batches, time.Now()); granted > 0 {
+		item.CreditToday = util.Ptr(granted)
 	}
 	item.Balance = util.Ptr(snapshot.Balance)
+	item.TotalLimit = snapshot.TotalLimit
+	item.TotalUsed = snapshot.TotalUsed
 	item.BatchCount = &summary.BatchCount
-	item.ExpiringDays = &days
-	item.Expiring = util.Ptr(summary.ExpiringAmount)
-	item.Expiring30d = util.Ptr(summary.Expiring30d)
-	item.Points = util.M{"balance": snapshot.Balance, "total_limit": snapshot.TotalLimit, "total_used": snapshot.TotalUsed, "batch_count": summary.BatchCount, "expiring_days": days, "expiring_amount": summary.ExpiringAmount, "expiring_30d": summary.Expiring30d, "earliest_expire": summary.Earliest}
-	logx.Info("%s 积分：余额 %g，批次 %d，%d 天内到期 %g，30 天内到期 %g", item.Label, snapshot.Balance, summary.BatchCount, days, summary.ExpiringAmount, summary.Expiring30d)
+	item.Expiring3d = util.Ptr(summary.Expiring3d)
+	item.Expiring7d = util.Ptr(summary.Expiring7d)
+	item.ExpiringCount3d = &summary.ExpiringCount3d
+	item.ExpiringCount7d = &summary.ExpiringCount7d
+	item.Earliest3d = summary.Earliest3d
+	item.Earliest7d = summary.Earliest7d
+	item.Points = util.M{"balance": snapshot.Balance, "total_limit": snapshot.TotalLimit, "total_used": snapshot.TotalUsed, "batch_count": summary.BatchCount, "credit_today": item.CreditToday, "expiring_3d": summary.Expiring3d, "expiring_count_3d": summary.ExpiringCount3d, "earliest_3d": summary.Earliest3d, "expiring_7d": summary.Expiring7d, "expiring_count_7d": summary.ExpiringCount7d, "earliest_7d": summary.Earliest7d}
+	logx.Info("%s 积分：余额 %g，批次 %d，3 天内到期 %g（%d 笔），7 天内到期 %g（%d 笔）", item.Label, snapshot.Balance, summary.BatchCount, summary.Expiring3d, summary.ExpiringCount3d, summary.Expiring7d, summary.ExpiringCount7d)
 	if dry {
 		preview, _ := json.Marshal(item.Points)
 		logx.Info("dry-run 快照预览：%s", preview)
 	}
-}
-// todayCheckinCredits 从积分台账里取当天签到批次的额度，作为「今日签到所得」的准确值。
-func todayCheckinCredits(batches []provider.Batch) *float64 {
-	prefix := "checkin_" + strings.ReplaceAll(util.Today(), "-", "") + "_"
-	for _, b := range batches {
-		if b.Limit != nil && strings.HasPrefix(b.Name, prefix) {
-			return b.Limit
-		}
-	}
-	return nil
 }
 func finalize(item Item, stored util.M) error {
 	products := util.Map(stored["products"])
@@ -358,12 +369,12 @@ func finalize(item Item, stored util.M) error {
 	}
 	return nil
 }
-func ComposeNotification(r Report, c config.Config, days int) *notify.Notification {
+func ComposeNotification(r Report, c config.Config) *notify.Notification {
 	problems, warnings := 0, 0
 	for _, i := range r.Items {
 		if i.Error {
 			problems++
-		} else if days > 0 && i.Expiring != nil && *i.Expiring > 0 {
+		} else if i.Expiring3d != nil && *i.Expiring3d > 0 {
 			warnings++
 		}
 	}
@@ -404,15 +415,15 @@ func itemBits(i Item, notification bool) []string {
 	if i.Balance != nil {
 		bits = append(bits, fmt.Sprintf("余额 %g", *i.Balance))
 	}
-	if i.Expiring != nil && *i.Expiring != 0 && i.ExpiringDays != nil {
-		word := "到期"
-		if notification {
-			word = "将过期"
-		}
-		bits = append(bits, fmt.Sprintf("%d 天内%s %g", *i.ExpiringDays, word, *i.Expiring))
+	word := "到期"
+	if notification {
+		word = "将过期"
 	}
-	if notification && i.Expiring30d != nil && *i.Expiring30d != 0 {
-		bits = append(bits, fmt.Sprintf("30 天内将到期 %g", *i.Expiring30d))
+	if i.Expiring3d != nil && *i.Expiring3d != 0 {
+		bits = append(bits, fmt.Sprintf("3 天内%s %g", word, *i.Expiring3d))
+	}
+	if i.Expiring7d != nil && *i.Expiring7d != 0 {
+		bits = append(bits, fmt.Sprintf("7 天内%s %g", word, *i.Expiring7d))
 	}
 	return bits
 }

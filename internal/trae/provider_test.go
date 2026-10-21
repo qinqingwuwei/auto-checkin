@@ -80,6 +80,43 @@ func TestTraeWireProtocolAndLedger(t *testing.T) {
 		t.Fatalf("billing %v %v", billing, err)
 	}
 }
+
+// JWT 失效（12153）时应自动重新换票并重试一次，而不是直接让用户重新登录。
+func TestTraeRefreshesJWTAutomatically(t *testing.T) {
+	t.Setenv("CHECKIN_HOME", t.TempDir())
+	paths.Ensure()
+	util.WriteJSON(paths.TraeCred(), util.M{"session": "session-fixture", "jwt": nil})
+	mints, calls := 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case TokenPath:
+			if r.Header.Get(SessionCookie) != "session-fixture" {
+				t.Error("mint session")
+			}
+			mints++
+			json.NewEncoder(w).Encode(util.M{"Result": util.M{"Token": "fresh-token"}})
+		case StatusPath:
+			calls++
+			if r.Header.Get("Authorization") != "Cloud-IDE-JWT fresh-token" {
+				fmt.Fprint(w, `{"code":12153,"msg":"ticket expired"}`)
+				return
+			}
+			fmt.Fprint(w, `{"code":0,"checked_in":true,"credits":100}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	p := New()
+	p.BaseURL = server.URL
+	p.JWT = "stale-token"
+	defer p.Close()
+	status, err := p.Status(context.Background())
+	if err != nil || !status.CheckedIn || calls != 2 || mints != 1 || p.JWT != "fresh-token" {
+		t.Fatalf("auto refresh status=%+v calls=%d mints=%d jwt=%q err=%v", status, calls, mints, p.JWT, err)
+	}
+}
+
 func TestTraeErrorClassification(t *testing.T) {
 	for _, tc := range []struct {
 		code int

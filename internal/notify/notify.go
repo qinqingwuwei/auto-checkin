@@ -103,11 +103,12 @@ func sendDarwin(ctx context.Context, title, text string) (bool, string) {
 	return true, "ok"
 }
 
-// sendWindows 通过 Windows PowerShell 5.1 的 WinRT Toast 发送系统通知（Win10/11 自带，无需额外模块）。
-// 标题与正文通过环境变量传入，避免中文与引号在脚本里被转义破坏；
-// 以 PowerShell 自身的 AUMID 作为通知来源，未注册自定义 AUMID 的机器也能正常弹出。
+// sendWindows 依次尝试两种系统通知通道：
+// 1) WinRT Toast（Win10/11 原生通知，需 PowerShell 5.1 与通知中心可用）；
+// 2) NotifyIcon 托盘气泡（兼容 Win7/8、通知中心被关闭、Toast 未注册的机器）。
+// 标题与正文通过环境变量传入，避免中文与引号在脚本里被转义破坏。
 func sendWindows(ctx context.Context, title, text string) (bool, string) {
-	script := strings.Join([]string{
+	toast := strings.Join([]string{
 		`$ErrorActionPreference = "Stop"`,
 		`[void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime]`,
 		`$template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)`,
@@ -118,14 +119,45 @@ func sendWindows(ctx context.Context, title, text string) (bool, string) {
 		`$appId = "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe"`,
 		`[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast)`,
 	}, "\n")
+	if out, err := runPowerShell(ctx, toast, title, text); err == nil {
+		return true, "ok"
+	} else {
+		toastErr := strings.TrimSpace(string(out))
+		if toastErr == "" {
+			toastErr = err.Error()
+		}
+		balloon := strings.Join([]string{
+			`$ErrorActionPreference = "Stop"`,
+			`Add-Type -AssemblyName System.Windows.Forms`,
+			`Add-Type -AssemblyName System.Drawing`,
+			`$icon = New-Object System.Windows.Forms.NotifyIcon`,
+			`$icon.Icon = [System.Drawing.SystemIcons]::Information`,
+			`$icon.BalloonTipTitle = $env:CHECKIN_NOTIFY_TITLE`,
+			`$icon.BalloonTipText = $env:CHECKIN_NOTIFY_TEXT`,
+			`$icon.Visible = $true`,
+			`$icon.ShowBalloonTip(10000)`,
+			`Start-Sleep -Milliseconds 800`,
+			`$icon.Dispose()`,
+		}, "\n")
+		if out, berr := runPowerShell(ctx, balloon, title, text); berr == nil {
+			return true, "ok"
+		} else {
+			balloonErr := strings.TrimSpace(string(out))
+			if balloonErr == "" {
+				balloonErr = berr.Error()
+			}
+			return false, "Windows 系统通知失败（Toast：" + clip(toastErr, 160) + "；气泡：" + clip(balloonErr, 160) + "）"
+		}
+	}
+}
+
+// runPowerShell 执行一段 PowerShell 脚本并返回合并输出，便于把真实错误带回日志。
+func runPowerShell(ctx context.Context, script, title, text string) ([]byte, error) {
 	wait, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(wait, "powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", encodeUTF16(script))
+	cmd := exec.CommandContext(wait, "powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Sta", "-EncodedCommand", encodeUTF16(script))
 	cmd.Env = append(os.Environ(), "CHECKIN_NOTIFY_TITLE="+clip(title, 120), "CHECKIN_NOTIFY_TEXT="+clip(text, 400))
-	if err := cmd.Run(); err != nil {
-		return false, "Windows 系统通知调用失败（powershell 不可用或系统版本过低）"
-	}
-	return true, "ok"
+	return cmd.CombinedOutput()
 }
 
 func clip(s string, max int) string {
